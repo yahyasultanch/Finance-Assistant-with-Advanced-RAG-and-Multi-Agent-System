@@ -27,7 +27,8 @@ class ReporterAgent:
         price_metrics: Dict[str, Any],
         summaries: Dict[str, Dict[str, Any]],
         sentiment_results: Dict[str, Any],
-        news_items: List[Dict[str, str]]
+        news_items: List[Dict[str, str]],
+        rating_results: Dict[str, Any] = None
     ) -> str:
         """
         Generate analyst brief in markdown.
@@ -39,6 +40,7 @@ class ReporterAgent:
             summaries: Dict of query -> summary results
             sentiment_results: Sentiment analysis results
             news_items: List of news items
+            rating_results: Investment rating results (optional)
             
         Returns:
             Markdown text of the brief
@@ -51,6 +53,10 @@ class ReporterAgent:
         
         # Executive Summary
         report_sections.append(self._generate_executive_summary(ticker, summaries))
+        
+        # Investment Recommendation (new - after executive summary)
+        if rating_results:
+            report_sections.append(self._generate_recommendation_section(rating_results))
         
         # Company Snapshot
         report_sections.append(self._generate_snapshot(company_info, price_metrics))
@@ -172,6 +178,60 @@ class ReporterAgent:
         summary_text += "Key insights cover business operations, growth drivers, risk factors, and sentiment analysis.\n"
         
         return summary_text
+    
+    def _generate_recommendation_section(
+        self,
+        rating_results: Dict[str, Any]
+    ) -> str:
+        """Generate investment recommendation section."""
+        section = "## Investment Recommendation\n\n"
+        
+        # Rating badge and key metrics
+        rating = rating_results.get("rating", "HOLD")
+        rating_color = rating_results.get("rating_color", "🟡")
+        current_price = rating_results.get("current_price", 0)
+        price_target = rating_results.get("price_target", 0)
+        upside = rating_results.get("upside_percent", 0)
+        composite_score = rating_results.get("composite_score", 50)
+        
+        section += f"### {rating_color} **{rating}**\n\n"
+        
+        # Key metrics table
+        section += "| Metric | Value |\n"
+        section += "|--------|-------|\n"
+        section += f"| **Rating** | {rating} |\n"
+        section += f"| **Current Price** | ${current_price:.2f} |\n"
+        section += f"| **12M Price Target** | ${price_target:.2f} |\n"
+        
+        if upside >= 0:
+            section += f"| **Upside Potential** | +{upside:.1f}% |\n"
+        else:
+            section += f"| **Downside Risk** | {upside:.1f}% |\n"
+        
+        section += f"| **Composite Score** | {composite_score:.1f}/100 |\n\n"
+        
+        # Component scores breakdown
+        component_scores = rating_results.get("component_scores", {})
+        if component_scores:
+            section += "**Rating Components:**\n\n"
+            section += "| Factor | Score | Weight |\n"
+            section += "|--------|-------|--------|\n"
+            section += f"| Fundamentals | {component_scores.get('fundamentals', 50):.1f}/100 | 35% |\n"
+            section += f"| Sentiment | {component_scores.get('sentiment', 50):.1f}/100 | 25% |\n"
+            section += f"| Technical | {component_scores.get('technical', 50):.1f}/100 | 20% |\n"
+            section += f"| Risk | {component_scores.get('risk', 50):.1f}/100 | 20% |\n\n"
+        
+        # Reasoning bullets
+        reasoning = rating_results.get("reasoning", [])
+        if reasoning:
+            section += "**Investment Rationale:**\n\n"
+            for point in reasoning:
+                section += f"- {point}\n"
+            section += "\n"
+        
+        section += "---\n\n"
+        
+        return section
 
     def _generate_snapshot(
         self,

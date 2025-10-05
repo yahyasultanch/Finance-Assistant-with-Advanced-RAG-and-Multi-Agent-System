@@ -131,6 +131,12 @@ Provide {max_bullets} bullet points that directly answer the question, with cita
         cited_ids = self._extract_citation_ids(summary_text)
         citations = [citation_map[cid] for cid in cited_ids if cid in citation_map]
         
+        logger.info(f"Extracted {len(cited_ids)} citation IDs from summary: {cited_ids}")
+        logger.info(f"Matched {len(citations)} citations from citation_map")
+        
+        if len(cited_ids) > 0 and len(citations) == 0:
+            logger.warning(f"Citation IDs found but no matches in citation_map. IDs: {cited_ids}, Map keys: {list(citation_map.keys())}")
+        
         return {
             "summary": summary_text,
             "citations": citations,
@@ -186,11 +192,11 @@ Provide {max_bullets} bullet points that directly answer the question, with cita
         )
 
     def get_recent_events(self, ticker: str) -> Dict[str, Any]:
-        """Get recent material events."""
+        """Get recent material events from 8-K filings."""
         return self.generate_summary(
-            f"What material events or changes has {ticker} reported in the last 90 days?",
+            f"What material events has {ticker} reported in Form 8-K filings? Include specific events like earnings releases, leadership changes, acquisitions, or material agreements.",
             ticker,
-            max_bullets=3
+            max_bullets=5  # Increase to 5 for events
         )
 
     def get_financial_outlook(self, ticker: str) -> Dict[str, Any]:

@@ -231,11 +231,17 @@ class ReporterAgent:
         # Add citations if present
         citations = summary_result.get("citations", [])
         if citations:
-            section += "**Sources:**\n"
+            section += "\n**Sources:**\n"  # Single newline after summary, then Sources header
             for citation in citations:
                 ref = citation.get("reference", "")
                 source = citation.get("source", "")
-                section += f"- {ref}: {source}\n"
+                # Only add citation if both reference and source are non-empty
+                if ref and source:
+                    # Escape brackets in reference to prevent markdown link interpretation
+                    ref_escaped = ref.replace('[', '\\[').replace(']', '\\]')
+                    section += f"- {ref_escaped}: {source}\n"
+                else:
+                    logger.warning(f"Empty citation in {title}: ref={ref}, source={source}")
         
         return section
 
@@ -277,11 +283,13 @@ class ReporterAgent:
         
         section += f"**Predominant Sentiment:** {predominant.capitalize()}\n\n"
         
-        # Interpretation
+        # Interpretation - fixed logic to handle zero correctly
         if sentiment_index > 0.3:
             interpretation = "**Strong positive** sentiment across news and filings."
-        elif sentiment_index > 0:
+        elif sentiment_index > 0.05:
             interpretation = "**Moderately positive** sentiment."
+        elif sentiment_index >= -0.05:
+            interpretation = "**Neutral** sentiment overall."
         elif sentiment_index > -0.3:
             interpretation = "**Moderately negative** sentiment."
         else:

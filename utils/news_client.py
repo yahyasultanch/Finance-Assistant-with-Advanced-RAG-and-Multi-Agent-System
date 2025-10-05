@@ -111,12 +111,18 @@ class NewsClient:
             
             headlines = []
             for item in news[:max_items]:
+                # Use thumbnail text or description if available for better sentiment analysis
+                summary = item.get("thumbnail", {}).get("resolutions", [{}])[0].get("tag", "")
+                if not summary or summary == item.get("title", ""):
+                    # Fall back to title + source for context
+                    summary = f"{item.get('title', '')} - {item.get('publisher', 'Yahoo Finance')}"
+                
                 headlines.append({
                     "title": item.get("title", ""),
                     "date": datetime.fromtimestamp(item.get("providerPublishTime", 0)).strftime("%Y-%m-%d"),
                     "source": item.get("publisher", "Yahoo Finance"),
                     "url": item.get("link", ""),
-                    "summary": item.get("title", "")  # Yahoo doesn't always provide summary
+                    "summary": summary[:500]
                 })
             
             return headlines

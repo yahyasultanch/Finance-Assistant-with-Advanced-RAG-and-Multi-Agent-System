@@ -194,7 +194,7 @@ Provide {max_bullets} bullet points that directly answer the question, with cita
     def get_recent_events(self, ticker: str) -> Dict[str, Any]:
         """Get recent material events from 8-K filings."""
         return self.generate_summary(
-            f"What material events has {ticker} reported in Form 8-K filings? Include specific events like earnings releases, leadership changes, acquisitions, or material agreements.",
+            f"What are the most recent material events, announcements, or significant developments for {ticker}? Include earnings releases, executive changes, acquisitions, agreements, shareholder meetings, or other important corporate events.",
             ticker,
             max_bullets=5  # Increase to 5 for events
         )

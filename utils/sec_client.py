@@ -2,8 +2,9 @@
 import requests
 import json
 import time
+import re
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 import logging
 
@@ -219,3 +220,123 @@ class SECClient:
         except Exception as e:
             logger.error(f"Error parsing filing {filepath}: {e}")
             return ""
+
+    # 8-K Item mapping: https://www.sec.gov/files/form8-k.pdf
+    EIGHT_K_ITEMS = {
+        "1.01": "Material Agreement",
+        "1.02": "Termination of Material Agreement",
+        "1.03": "Bankruptcy or Receivership",
+        "1.04": "Mine Safety Disclosure",
+        "2.01": "Completion of Acquisition or Disposition",
+        "2.02": "Results of Operations and Financial Condition",
+        "2.03": "Creation of Direct Financial Obligation",
+        "2.04": "Triggering Events That Accelerate Obligations",
+        "2.05": "Costs Associated with Exit Activities",
+        "2.06": "Material Impairments",
+        "3.01": "Notice of Delisting",
+        "3.02": "Unregistered Sales of Equity Securities",
+        "3.03": "Material Modifications to Rights of Security Holders",
+        "4.01": "Changes in Registrant's Certifying Accountant",
+        "4.02": "Non-Reliance on Previously Issued Financial Statements",
+        "5.01": "Changes in Control of Registrant",
+        "5.02": "Departure/Election of Directors or Officers",
+        "5.03": "Amendments to Articles of Incorporation or Bylaws",
+        "5.04": "Temporary Suspension of Trading",
+        "5.05": "Amendments to Registrant's Code of Ethics",
+        "5.06": "Change in Shell Company Status",
+        "5.07": "Submission of Matters to Vote of Security Holders",
+        "5.08": "Shareholder Nominations",
+        "7.01": "Regulation FD Disclosure",
+        "8.01": "Other Events",
+        "9.01": "Financial Statements and Exhibits"
+    }
+
+    def parse_8k_items(self, filepath: str) -> List[Dict[str, str]]:
+        """
+        Parse 8-K filing to extract Item numbers and descriptions.
+        
+        Args:
+            filepath: Path to 8-K HTML filing
+            
+        Returns:
+            List of dicts with 'item', 'item_name', 'description'
+        """
+        try:
+            from bs4 import BeautifulSoup
+            
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                html_content = f.read()
+            
+            soup = BeautifulSoup(html_content, 'lxml')
+            text = soup.get_text()
+            
+            # Find Item patterns like "Item 2.02", "Item 5.02", etc.
+            item_pattern = r'Item\s+(\d+\.\d+)[:\.\s]+([^\n]+)'
+            matches = re.finditer(item_pattern, text, re.IGNORECASE)
+            
+            items_found = []
+            for match in matches:
+                item_num = match.group(1)
+                item_desc = match.group(2).strip()
+                
+                # Get the standard item name
+                item_name = self.EIGHT_K_ITEMS.get(item_num, "Other")
+                
+                # Extract more context (next 500 chars after item header)
+                start_pos = match.end()
+                context = text[start_pos:start_pos + 500].strip()
+                
+                # Clean up context
+                context = ' '.join(context.split())[:300]
+                
+                items_found.append({
+                    "item": item_num,
+                    "item_name": item_name,
+                    "description": context if context else item_desc
+                })
+            
+            # Remove duplicates (keep first occurrence)
+            seen = set()
+            unique_items = []
+            for item in items_found:
+                if item['item'] not in seen:
+                    seen.add(item['item'])
+                    unique_items.append(item)
+            
+            return unique_items
+            
+        except Exception as e:
+            logger.error(f"Error parsing 8-K items from {filepath}: {e}")
+            return []
+
+    def extract_8k_event_summary(self, filing: Dict[str, Any]) -> str:
+        """
+        Generate a human-readable summary of an 8-K event.
+        
+        Args:
+            filing: Filing metadata with 'filepath' key
+            
+        Returns:
+            Event summary string
+        """
+        filepath = filing.get('filepath')
+        if not filepath:
+            return f"8-K Filing on {filing.get('filing_date', 'unknown date')}"
+        
+        items = self.parse_8k_items(filepath)
+        
+        if not items:
+            return f"8-K Filing on {filing.get('filing_date', 'unknown date')}"
+        
+        # Create summary based on most important items
+        primary_items = [item for item in items if item['item'] in ['2.02', '1.01', '5.02', '2.01']]
+        
+        if not primary_items:
+            primary_items = items[:2]  # Take first 2 items if no priority items
+        
+        if len(primary_items) == 1:
+            item = primary_items[0]
+            return f"{item['item_name']}: {item['description'][:200]}"
+        else:
+            item_names = [item['item_name'] for item in primary_items]
+            return f"Multiple events: {', '.join(item_names)}"

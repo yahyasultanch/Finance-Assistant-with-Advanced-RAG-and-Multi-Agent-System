@@ -45,7 +45,7 @@ class IngestionAgent:
             chunk_overlap: Chunk overlap in characters
         """
         self.sec_client = SECClient(sec_user_agent, data_dir / "raw")
-        self.news_client = NewsClient()
+        self.news_client = NewsClient(sec_client=self.sec_client)  # Pass SEC client for 8-K parsing
         self.price_client = PriceClient()
         self.chunker = DocumentChunker(chunk_size, chunk_overlap)
         self.embedding_model = EmbeddingModel(
@@ -93,19 +93,27 @@ class IngestionAgent:
         results["filings"] = filings
         logger.info(f"Found {len(filings)} filings")
         
-        # 2. Fetch news
+        # 2. Download 8-K filings early for news parsing
+        logger.info("Pre-downloading 8-K filings for event parsing...")
+        for filing in filings:
+            if filing["form_type"] == "8-K":
+                filepath = self.sec_client.download_filing(filing)
+                if filepath:
+                    filing['filepath'] = filepath
+        
+        # 3. Fetch news (now 8-Ks have filepaths for detailed parsing)
         logger.info("Fetching news...")
         news = self.news_client.aggregate_news(ticker, filings, use_yahoo=True, days_back=90)
         results["news"] = news
         logger.info(f"Found {len(news)} news items")
         
-        # 3. Fetch price data
+        # 4. Fetch price data
         logger.info("Fetching price data...")
         price_data = self.price_client.get_key_metrics(ticker)
         company_info = self.price_client.get_company_info(ticker)
         results["price_data"] = {**price_data, **company_info}
         
-        # 4. Process filings and create chunks
+        # 5. Process filings and create chunks
         logger.info("Processing filings and creating chunks...")
         all_chunks = []
         
@@ -114,6 +122,9 @@ class IngestionAgent:
             filepath = self.sec_client.download_filing(filing)
             if not filepath:
                 continue
+            
+            # Store filepath in filing metadata for later use (e.g., 8-K parsing)
+            filing['filepath'] = filepath
             
             # Parse text
             text = self.sec_client.parse_filing_text(filepath)
@@ -145,15 +156,19 @@ class IngestionAgent:
         
         # Add news as chunks
         for news_item in news:
+            # Determine form_type based on source (8-K events vs regular news)
+            form_type = "8-K" if news_item["source"] == "SEC 8-K" else "NEWS"
+            
             news_chunk = {
                 "text": f"{news_item['title']}. {news_item['summary']}",
                 "chunk_id": len(all_chunks),
                 "metadata": {
                     "ticker": ticker,
-                    "form_type": "NEWS",
+                    "form_type": form_type,
                     "filing_date": news_item["date"],
                     "source": news_item["source"],
-                    "url": news_item["url"]
+                    "url": news_item["url"],
+                    "section": "Document"  # Add section for citation consistency
                 }
             }
             all_chunks.append(news_chunk)
@@ -161,7 +176,7 @@ class IngestionAgent:
         results["chunks_created"] = len(all_chunks)
         logger.info(f"Created {len(all_chunks)} chunks")
         
-        # 5. Build vector index
+        # 6. Build vector index
         if all_chunks:
             logger.info("Building vector index...")
             index_path = self.index_dir / f"{ticker.lower()}"

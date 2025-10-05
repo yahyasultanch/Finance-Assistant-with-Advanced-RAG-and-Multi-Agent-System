@@ -1,7 +1,7 @@
 """News client for fetching financial headlines."""
 import requests
 import feedparser
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import logging
 
@@ -11,32 +11,53 @@ logger = logging.getLogger(__name__)
 class NewsClient:
     """Client for fetching financial news headlines."""
 
-    def __init__(self):
-        """Initialize news client."""
+    def __init__(self, sec_client=None):
+        """
+        Initialize news client.
+        
+        Args:
+            sec_client: Optional SECClient instance for parsing 8-K details
+        """
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
+        self.sec_client = sec_client
 
     def get_sec_news_from_8k(self, filings: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         """
-        Extract news events from 8-K filings.
+        Extract news events from 8-K filings with actual event descriptions.
         
         Args:
-            filings: List of filing metadata from SEC
+            filings: List of filing metadata from SEC (should include 'filepath' if downloaded)
             
         Returns:
-            List of news items extracted from 8-K filings
+            List of news items extracted from 8-K filings with event details
         """
         news_items = []
         
         for filing in filings:
             if filing["form_type"] == "8-K":
+                # Try to get detailed event summary if SEC client is available
+                if self.sec_client and filing.get('filepath'):
+                    try:
+                        event_summary = self.sec_client.extract_8k_event_summary(filing)
+                        title = f"8-K: {event_summary[:100]}"
+                        summary = event_summary
+                    except Exception as e:
+                        logger.warning(f"Could not parse 8-K details: {e}")
+                        title = f"8-K Filing: {filing['filing_date']}"
+                        summary = f"Material event reported via 8-K on {filing['filing_date']}"
+                else:
+                    # Fallback to generic description
+                    title = f"8-K Filing: {filing['filing_date']}"
+                    summary = f"Material event reported via 8-K on {filing['filing_date']}"
+                
                 news_items.append({
-                    "title": f"8-K Filing: {filing['filing_date']}",
+                    "title": title,
                     "date": filing["filing_date"],
                     "source": "SEC 8-K",
                     "url": filing["document_url"],
-                    "summary": f"Material event reported via 8-K on {filing['filing_date']}"
+                    "summary": summary
                 })
         
         return news_items

@@ -28,7 +28,8 @@ class ReporterAgent:
         summaries: Dict[str, Dict[str, Any]],
         sentiment_results: Dict[str, Any],
         news_items: List[Dict[str, str]],
-        rating_results: Dict[str, Any] = None
+        rating_results: Dict[str, Any] = None,
+        prediction_results: Dict[str, Any] = None
     ) -> str:
         """
         Generate analyst brief in markdown.
@@ -41,6 +42,7 @@ class ReporterAgent:
             sentiment_results: Sentiment analysis results
             news_items: List of news items
             rating_results: Investment rating results (optional)
+            prediction_results: Predictive forecasts (optional)
             
         Returns:
             Markdown text of the brief
@@ -98,6 +100,10 @@ class ReporterAgent:
         
         # Sentiment Analysis
         report_sections.append(self._generate_sentiment_section(sentiment_results, news_items))
+        
+        # Forward Outlook & Predictions (new)
+        if prediction_results:
+            report_sections.append(self._generate_predictions_section(prediction_results))
         
         # Appendix
         report_sections.append(self._generate_appendix(summaries))
@@ -356,6 +362,126 @@ class ReporterAgent:
             interpretation = "**Strong negative** sentiment."
         
         section += f"**Interpretation:** {interpretation}\n"
+        
+        return section
+    
+    def _generate_predictions_section(
+        self,
+        prediction_results: Dict[str, Any]
+    ) -> str:
+        """Generate forward outlook & predictions section."""
+        section = "## Forward Outlook & Predictions\n\n"
+        
+        predictions = prediction_results.get("predictions", {})
+        
+        # Short-term prediction
+        short_term = predictions.get("short_term", {})
+        if short_term:
+            section += "### 📅 Short-Term Forecast (1-7 Days)\n\n"
+            section += f"**Target Price:** ${short_term.get('target_price', 0):.2f}\n\n"
+            section += f"**Expected Move:** {short_term.get('expected_change_pct', 0):+.2f}%\n\n"
+            section += f"**Direction:** {short_term.get('direction', 'sideways').capitalize()}\n\n"
+            
+            confidence = short_term.get('confidence', 'low').upper()
+            confidence_emoji = "🟢" if confidence == "HIGH" else "🟡" if confidence == "MEDIUM" else "🔴"
+            section += f"**Confidence:** {confidence_emoji} {confidence}\n\n"
+            
+            drivers = short_term.get('key_drivers', [])
+            if drivers:
+                section += "**Key Drivers:**\n"
+                for driver in drivers:
+                    section += f"- {driver}\n"
+                section += "\n"
+        
+        # Long-term prediction
+        long_term = predictions.get("long_term", {})
+        if long_term:
+            section += "### � Long-Term Forecast (3-12 Months)\n\n"
+            section += f"**Target Price:** ${long_term.get('target_price', 0):.2f}\n\n"
+            
+            # Show risk-adjusted range if available
+            upside = long_term.get('upside_target')
+            downside = long_term.get('downside_target')
+            if upside and downside:
+                section += f"**Risk-Adjusted Range:** ${downside:.2f} - ${upside:.2f}\n\n"
+            
+            section += f"**Expected Move:** {long_term.get('expected_change_pct', 0):+.2f}%\n\n"
+            section += f"**Direction:** {long_term.get('direction', 'sideways').capitalize()}\n\n"
+            
+            confidence = long_term.get('confidence', 'low').upper()
+            confidence_emoji = "🟢" if confidence == "HIGH" else "🟡" if confidence == "MEDIUM" else "🔴"
+            section += f"**Confidence:** {confidence_emoji} {confidence}  \n\n"
+            
+            # Show catalysts if integrated
+            catalysts_count = long_term.get('catalysts_identified', 0)
+            if catalysts_count > 0:
+                section += f"**High-Confidence Catalysts:** {catalysts_count}  \n\n"
+            
+            drivers = long_term.get('key_drivers', [])
+            if drivers:
+                section += "**Key Drivers:**\n"
+                for driver in drivers:
+                    section += f"- {driver}\n"
+                section += "\n"
+        
+        # Sentiment Momentum Analysis
+        sentiment_momentum = prediction_results.get("sentiment_momentum", {})
+        if sentiment_momentum:
+            section += "### 📈 Sentiment Momentum Analysis\n\n"
+            
+            trend = sentiment_momentum.get("trend", "stable")
+            velocity = sentiment_momentum.get("velocity", 0)
+            
+            trend_emoji = "📈" if trend == "improving" else "📉" if trend == "deteriorating" else "➡️"
+            section += f"**Trend:** {trend_emoji} {trend.capitalize()}  \n"
+            section += f"**Velocity:** {velocity:+.3f} (rate of sentiment change)  \n\n"
+        
+        # Detected Catalysts
+        catalysts = prediction_results.get("catalysts", [])
+        if catalysts:
+            section += "### 🎯 Upcoming Catalysts\n\n"
+            section += "| Event Type | Source | Impact Estimate | Confidence |\n"
+            section += "|------------|--------|-----------------|------------|\n"
+            
+            for catalyst in catalysts[:5]:  # Top 5
+                event_type = catalyst.get("type", "").replace("_", " ").title()
+                source = catalyst.get("source", "").replace("_", " ").title()
+                impact = catalyst.get("impact_estimate", 0)
+                confidence = catalyst.get("confidence", 0)
+                
+                impact_str = f"{impact*100:+.1f}%"
+                confidence_str = f"{confidence*100:.0f}%"
+                
+                section += f"| {event_type} | {source} | {impact_str} | {confidence_str} |\n"
+            
+            section += "\n"
+        
+        # Macro Factors
+        macro_factors = prediction_results.get("macro_factors", {})
+        detected_factors = macro_factors.get("detected_factors", [])
+        if detected_factors:
+            section += "### 🌍 Macro & Geopolitical Factors\n\n"
+            
+            for factor in detected_factors:
+                factor_type = factor.get("type", "").replace("_", " ").title()
+                mentions = factor.get("mentions", 0)
+                sentiment_label = factor.get("sentiment", "neutral").capitalize()
+                impact = factor.get("impact", "low").upper()
+                
+                sentiment_emoji = "🟢" if sentiment_label == "Positive" else "🔴" if sentiment_label == "Negative" else "🟡"
+                
+                section += f"- **{factor_type}**: {mentions} mentions | {sentiment_emoji} {sentiment_label} sentiment | Impact: {impact}  \n"
+            
+            section += "\n"
+            
+            macro_risk = macro_factors.get("overall_macro_risk", "moderate").upper()
+            section += f"**Overall Macro Risk Level:** {macro_risk}  \n\n"
+        
+        # Disclaimer
+        section += "---\n\n"
+        section += "**Prediction Disclaimer:** Forecasts are probabilistic estimates based on historical data, sentiment analysis, "
+        section += "and identified catalysts. Actual outcomes may vary significantly due to unforeseen events, market volatility, "
+        section += "and other factors beyond the model's scope. These predictions should be used as directional guidance only.\n"
         
         return section
 

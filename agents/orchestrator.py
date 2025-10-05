@@ -9,6 +9,7 @@ from agents.sentiment_agent import SentimentAgent
 from agents.reporter_agent import ReporterAgent
 from utils.prices import PriceClient
 from utils.rating_engine import RatingEngine
+from utils.predictive_model import PredictiveEngine
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class Orchestrator:
         self.reporter_agent = ReporterAgent(reports_dir)
         self.price_client = PriceClient()
         self.rating_engine = RatingEngine()
+        self.predictive_engine = PredictiveEngine()
         
         self.azure_endpoint = azure_endpoint
         self.azure_key = azure_key
@@ -186,8 +188,26 @@ class Orchestrator:
             summaries=summaries
         )
         
-        # Step 6: Generate report
-        logger.info("Step 6: Generating analyst brief...")
+        # Step 6: Generate predictions
+        logger.info("Step 6: Generating predictive forecasts...")
+        prediction_results = self.predictive_engine.generate_predictions(
+            ticker=ticker,
+            price_data={
+                "current_price": price_metrics.get("current_price", 0),
+                "ytd_return": price_metrics.get("ytd_return", 0),
+                "high_52w": price_metrics.get("high_52w", 0),
+                "low_52w": price_metrics.get("low_52w", 0),
+                "volatility": price_metrics.get("volatility", 30)
+            },
+            company_info=company_info,
+            sentiment_results=sentiment_results,
+            news_items=news_items,
+            rating_results=rating_results,
+            summaries=summaries
+        )
+        
+        # Step 7: Generate report
+        logger.info("Step 7: Generating analyst brief...")
         report_content = self.reporter_agent.generate_brief(
             ticker,
             company_info,
@@ -195,11 +215,12 @@ class Orchestrator:
             summaries,
             sentiment_results,
             news_items,
-            rating_results
+            rating_results,
+            prediction_results
         )
         
-        # Step 7: Save report
-        logger.info("Step 7: Saving report...")
+        # Step 8: Save report
+        logger.info("Step 8: Saving report...")
         report_path = self.reporter_agent.save_brief(
             ticker,
             report_content,
@@ -215,6 +236,7 @@ class Orchestrator:
             "summaries": summaries,
             "sentiment": sentiment_results,
             "rating": rating_results,
+            "predictions": prediction_results,
             "company_info": company_info,
             "price_metrics": price_metrics
         }

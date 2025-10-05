@@ -151,11 +151,108 @@ class NewsClient:
             logger.error(f"Error fetching Yahoo Finance news for {ticker}: {e}")
             return []
 
+    def get_financial_rss_feeds(self, ticker: str, days_back: int = 90) -> List[Dict[str, str]]:
+        """
+        Fetch news from free financial RSS feeds.
+        
+        Args:
+            ticker: Stock ticker symbol
+            days_back: Number of days to look back
+            
+        Returns:
+            List of news headline dicts from RSS feeds
+        """
+        # Free RSS feeds (no API key required)
+        rss_feeds = [
+            f"https://finance.yahoo.com/rss/headline?s={ticker}",
+            "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US",
+            "https://www.marketwatch.com/rss/topstories",
+        ]
+        
+        return self.get_rss_headlines(ticker, rss_feeds, days_back)
+
+    def get_reddit_discussions(self, ticker: str, max_posts: int = 10) -> List[Dict[str, str]]:
+        """
+        Fetch Reddit discussions about a ticker from financial subreddits.
+        
+        Requires Reddit API credentials (free). To set up:
+        1. Go to https://www.reddit.com/prefs/apps
+        2. Click "Create App" or "Create Another App"
+        3. Select "script" type
+        4. Note your client_id and client_secret
+        5. Add to .env file:
+           REDDIT_CLIENT_ID=your_client_id_here
+           REDDIT_CLIENT_SECRET=your_client_secret_here
+        
+        Args:
+            ticker: Stock ticker symbol
+            max_posts: Maximum number of posts to fetch
+            
+        Returns:
+            List of Reddit post dicts
+        """
+        try:
+            import praw
+            import os
+            
+            # Get credentials from environment
+            client_id = os.getenv("REDDIT_CLIENT_ID", "")
+            client_secret = os.getenv("REDDIT_CLIENT_SECRET", "")
+            
+            if not client_id or not client_secret:
+                logger.info("Reddit credentials not configured. Skipping Reddit integration. See documentation for setup instructions.")
+                return []
+            
+            # Initialize Reddit with credentials
+            reddit = praw.Reddit(
+                client_id=client_id,
+                client_secret=client_secret,
+                user_agent="FinanceAnalyst/1.0 (by /u/YourRedditUsername)"
+            )
+            
+            discussions = []
+            subreddits = ["wallstreetbets", "stocks", "investing"]
+            
+            for subreddit_name in subreddits:
+                try:
+                    subreddit = reddit.subreddit(subreddit_name)
+                    
+                    # Search for ticker mentions
+                    query = f"${ticker} OR {ticker}"
+                    for submission in subreddit.search(query, limit=max_posts // len(subreddits), time_filter="week"):
+                        # Calculate a pseudo-date from timestamp
+                        post_date = datetime.fromtimestamp(submission.created_utc).strftime("%Y-%m-%d")
+                        
+                        discussions.append({
+                            "title": submission.title,
+                            "date": post_date,
+                            "source": f"Reddit r/{subreddit_name}",
+                            "url": f"https://reddit.com{submission.permalink}",
+                            "summary": submission.selftext[:300] if submission.selftext else submission.title,
+                            "score": submission.score
+                        })
+                except Exception as e:
+                    logger.warning(f"Error fetching from r/{subreddit_name}: {e}")
+                    continue
+            
+            # Sort by score (upvotes) to get most popular discussions
+            discussions.sort(key=lambda x: x.get("score", 0), reverse=True)
+            return discussions[:max_posts]
+            
+        except ImportError:
+            logger.error("PRAW not installed. Run: pip install praw")
+            return []
+        except Exception as e:
+            logger.error(f"Error fetching Reddit discussions for {ticker}: {e}")
+            return []
+
     def aggregate_news(
         self, 
         ticker: str, 
         sec_filings: List[Dict[str, Any]] = None,
         use_yahoo: bool = True,
+        use_rss: bool = True,
+        use_reddit: bool = True,
         days_back: int = 90
     ) -> List[Dict[str, str]]:
         """
@@ -165,6 +262,8 @@ class NewsClient:
             ticker: Stock ticker symbol
             sec_filings: SEC filings to extract 8-K events from
             use_yahoo: Whether to include Yahoo Finance news
+            use_rss: Whether to include RSS feeds
+            use_reddit: Whether to include Reddit discussions
             days_back: Number of days to look back
             
         Returns:
@@ -176,11 +275,25 @@ class NewsClient:
         if sec_filings:
             sec_news = self.get_sec_news_from_8k(sec_filings)
             all_news.extend(sec_news)
+            logger.info(f"Found {len(sec_news)} 8-K events")
         
         # Get Yahoo Finance news
         if use_yahoo:
             yahoo_news = self.get_yahoo_finance_news(ticker, max_items=20)
             all_news.extend(yahoo_news)
+            logger.info(f"Found {len(yahoo_news)} Yahoo Finance articles")
+        
+        # Get RSS feed news
+        if use_rss:
+            rss_news = self.get_financial_rss_feeds(ticker, days_back)
+            all_news.extend(rss_news)
+            logger.info(f"Found {len(rss_news)} RSS feed articles")
+        
+        # Get Reddit discussions
+        if use_reddit:
+            reddit_news = self.get_reddit_discussions(ticker, max_posts=10)
+            all_news.extend(reddit_news)
+            logger.info(f"Found {len(reddit_news)} Reddit discussions")
         
         # Sort by date (newest first)
         all_news.sort(key=lambda x: x["date"], reverse=True)
@@ -194,4 +307,5 @@ class NewsClient:
                 seen_titles.add(title_lower)
                 unique_news.append(item)
         
-        return unique_news[:30]  # Limit to 30 most recent unique items
+        logger.info(f"Total unique news items after deduplication: {len(unique_news)}")
+        return unique_news[:40]  # Increased limit to 40 for more diverse sources

@@ -15,6 +15,7 @@ rank-bm25>=0.2.2
 
 # Financial data
 yfinance>=0.2.48
+praw>=7.8.0  # Reddit API for social sentiment
 
 # HTTP and parsing
 requests>=2.32.0

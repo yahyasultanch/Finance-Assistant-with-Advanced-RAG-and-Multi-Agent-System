@@ -102,10 +102,17 @@ class IngestionAgent:
                     filing['filepath'] = filepath
         
         # 3. Fetch news (now 8-Ks have filepaths for detailed parsing)
-        logger.info("Fetching news...")
-        news = self.news_client.aggregate_news(ticker, filings, use_yahoo=True, days_back=90)
+        logger.info("Fetching news from all sources...")
+        news = self.news_client.aggregate_news(
+            ticker, 
+            filings, 
+            use_yahoo=True, 
+            use_rss=True, 
+            use_reddit=True, 
+            days_back=90
+        )
         results["news"] = news
-        logger.info(f"Found {len(news)} news items")
+        logger.info(f"Found {len(news)} total news items")
         
         # 4. Fetch price data
         logger.info("Fetching price data...")

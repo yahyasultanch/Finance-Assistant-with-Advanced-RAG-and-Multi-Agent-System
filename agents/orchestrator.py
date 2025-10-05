@@ -229,6 +229,21 @@ class Orchestrator:
         
         logger.info(f"Brief generation complete for {ticker}")
         
+        # Get price history for charts
+        price_client = PriceClient()
+        price_df = price_client.get_price_data(ticker, period="1y")
+        price_history = []
+        if price_df is not None and not price_df.empty:
+            for idx, row in price_df.iterrows():
+                price_history.append({
+                    'date': idx.strftime('%Y-%m-%d'),
+                    'open': float(row['Open']),
+                    'high': float(row['High']),
+                    'low': float(row['Low']),
+                    'close': float(row['Close']),
+                    'volume': int(row['Volume'])
+                })
+        
         return {
             "ticker": ticker,
             "report_path": report_path,
@@ -236,9 +251,14 @@ class Orchestrator:
             "summaries": summaries,
             "sentiment": sentiment_results,
             "rating": rating_results,
-            "predictions": prediction_results,
+            "prediction_results": prediction_results,
             "company_info": company_info,
-            "price_metrics": price_metrics
+            "price_metrics": price_metrics,
+            "price_data": {
+                "current_price": price_metrics.get("current_price", 0),
+                "history": price_history
+            },
+            "news_data": news_items
         }
 
     def get_quick_summary(self, ticker: str, query: str) -> Dict[str, Any]:

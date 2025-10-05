@@ -7,6 +7,9 @@ import logging
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Configure logging
+logger = logging.getLogger(__name__)
+
 from config import (
     DATA_DIR, INDEX_DIR, REPORTS_DIR,
     SEC_USER_AGENT, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY,
@@ -15,6 +18,7 @@ from config import (
     CHUNK_SIZE, CHUNK_OVERLAP, TOP_K_RETRIEVAL
 )
 from agents.orchestrator import Orchestrator
+from utils.visualizations import FinancialCharts
 
 # Configure logging
 logging.basicConfig(
@@ -110,52 +114,82 @@ def main():
         **FinBERT:** {FINBERT_MODEL.split('/')[-1]}
         """)
         
+        # Generate brief button
         generate_button = st.button("🚀 Generate Brief", type="primary", use_container_width=True)
-    
-    # Main content area
-    if generate_button:
+        
+        if generate_button:
+            # Store input params in session state
+            st.session_state['ticker'] = ticker
+            st.session_state['use_cache'] = use_cache
+            st.session_state['days_back'] = days_back
+            st.session_state['save_format'] = save_format
+            st.session_state['generate_clicked'] = True
+            st.session_state['result'] = None  # Clear previous result
+        
+    # Main content area - Check if we should display results
+    if st.session_state.get('generate_clicked', False):
+        # Get params from session state
+        ticker = st.session_state.get('ticker', '')
+        use_cache = st.session_state.get('use_cache', True)
+        days_back = st.session_state.get('days_back', 365)
+        save_format = st.session_state.get('save_format', 'markdown')
+        
         if not ticker:
             st.error("Please enter a stock ticker")
+            st.session_state['generate_clicked'] = False
             return
         
-        try:
-            orchestrator = get_orchestrator()
-            
-            # Progress tracking
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            # Step 1: Ingestion
-            status_text.text("📥 Step 1/5: Ingesting SEC filings and news...")
-            progress_bar.progress(10)
-            
-            with st.spinner("Fetching data from SEC EDGAR and news sources..."):
-                # This will be done inside orchestrator
-                pass
-            
-            progress_bar.progress(30)
-            
-            # Step 2: Generate brief
-            status_text.text("🤖 Step 2/5: Generating RAG summaries...")
-            progress_bar.progress(40)
-            
-            with st.spinner("Running retrieval-augmented generation..."):
-                result = orchestrator.generate_brief(
-                    ticker=ticker,
-                    use_cache=use_cache,
-                    days_back=days_back,
-                    save_format=save_format
-                )
-            
-            progress_bar.progress(80)
-            
-            # Step 3: Display results
-            status_text.text("📊 Step 3/5: Analyzing sentiment...")
-            progress_bar.progress(90)
-            
-            status_text.text("✅ Complete!")
-            progress_bar.progress(100)
-            
+        # Check if we already have results
+        if st.session_state.get('result') is None:
+            try:
+                orchestrator = get_orchestrator()
+                
+                # Progress tracking
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                # Step 1: Ingestion
+                status_text.text("📥 Step 1/5: Ingesting SEC filings and news...")
+                progress_bar.progress(10)
+                
+                with st.spinner("Fetching data from SEC EDGAR and news sources..."):
+                    # This will be done inside orchestrator
+                    pass
+                
+                progress_bar.progress(30)
+                
+                # Step 2: Generate brief
+                status_text.text("🤖 Step 2/5: Generating RAG summaries...")
+                progress_bar.progress(40)
+                
+                with st.spinner("Running retrieval-augmented generation..."):
+                    result = orchestrator.generate_brief(
+                        ticker=ticker,
+                        use_cache=use_cache,
+                        days_back=days_back,
+                        save_format=save_format
+                    )
+                
+                # Store result in session state
+                st.session_state['result'] = result
+                
+                progress_bar.progress(80)
+                
+                # Step 3: Display results
+                status_text.text("📊 Step 3/5: Analyzing sentiment...")
+                progress_bar.progress(90)
+                
+                status_text.text("✅ Complete!")
+                progress_bar.progress(100)
+            except Exception as e:
+                st.error(f"Error generating brief: {str(e)}")
+                logger.error(f"Error in brief generation: {e}", exc_info=True)
+                st.session_state['generate_clicked'] = False
+                return
+        
+        # Get result from session state
+        result = st.session_state.get('result')
+        if result:
             # Display success message
             st.success(f"✅ Analyst brief generated for **{ticker}**!")
             
@@ -164,7 +198,7 @@ def main():
             st.header(f"📄 Analyst Brief - {ticker}")
             
             # Tabs for different views
-            tab1, tab2, tab3, tab4 = st.tabs(["📝 Report", "📊 Metrics", "💬 Sentiment", "🔍 Sources"])
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 Report", "📈 Charts", "📊 Metrics", "💬 Sentiment", "🔍 Sources"])
             
             with tab1:
                 st.markdown(result["report_content"])
@@ -178,6 +212,58 @@ def main():
                 )
             
             with tab2:
+                st.subheader("📈 Interactive Price Chart")
+                
+                # Initialize chart generator
+                charts = FinancialCharts()
+                
+                # Get data
+                price_data = result.get("price_data", {})
+                prediction_results = result.get("prediction_results", {})
+                
+                # Chart controls
+                col1, col2 = st.columns([1, 4])
+                
+                with col1:
+                    chart_type = st.radio(
+                        "Chart Type",
+                        options=["Candlestick", "Line"],
+                        index=0,
+                        help="Toggle between candlestick and line chart"
+                    )
+                
+                with col2:
+                    time_range = st.radio(
+                        "Time Range",
+                        options=["1W", "1M", "3M", "6M", "1Y", "ALL"],
+                        index=4,  # Default to 1Y
+                        horizontal=True,
+                        help="Select historical time range"
+                    )
+                
+                # Create and display main chart
+                main_fig = charts.create_main_price_chart(
+                    price_data=price_data,
+                    ticker=ticker,
+                    predictions=prediction_results,
+                    chart_type=chart_type.lower(),
+                    time_range=time_range
+                )
+                st.plotly_chart(main_fig, use_container_width=True, key="main_price_chart")
+                
+                # Legend explanation
+                st.markdown("""
+                **Chart Legend:**
+                - **Solid Line/Candles**: Historical price data
+                - **Dotted Purple Line**: Short-term prediction (7 days)
+                - **Dashed Purple Line**: Long-term prediction (12 months)
+                - **Shaded Area**: Risk-adjusted range (upside/downside)
+                - **Volume Bars**: Trading volume (green = up day, red = down day)
+                
+                💡 **Tip**: Use the range selector buttons above the chart or the timeline controls to adjust the view.
+                """)
+            
+            with tab3:
                 st.subheader("Key Metrics")
                 
                 col1, col2, col3, col4 = st.columns(4)
@@ -211,7 +297,7 @@ def main():
                         f"{price_metrics.get('volatility', 0):.2f}%"
                     )
             
-            with tab3:
+            with tab4:
                 st.subheader("Sentiment Analysis")
                 
                 sentiment = result.get("sentiment", {})
@@ -265,7 +351,7 @@ def main():
                 else:
                     st.info("No sentiment data available")
             
-            with tab4:
+            with tab5:
                 st.subheader("Data Sources")
                 
                 # Collect all citations
@@ -286,10 +372,6 @@ def main():
                         st.markdown(f"{i}. [{source} - {date}]({url})")
                 else:
                     st.info("No sources available")
-            
-        except Exception as e:
-            st.error(f"❌ Error generating brief: {str(e)}")
-            logging.error(f"Error in brief generation: {e}", exc_info=True)
     
     else:
         # Show instructions when not generating

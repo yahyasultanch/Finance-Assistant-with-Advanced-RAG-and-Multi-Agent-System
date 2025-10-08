@@ -14,7 +14,7 @@ This system revolutionizes the investment research process by:
 - **Investment Ratings**: Multi-factor BUY/HOLD/SELL recommendations with 12-month price targets
 - **Predictive Forecasting**: AI-powered short-term (7-day) and long-term (12-month) price predictions
 - **Interactive Visualizations**: Dynamic candlestick charts with predictions, sentiment timelines, and performance tracking
-- 📄 **Analyst Briefs**: Professional 2-3 page reports with KPIs, insights, and complete source attribution
+- **Analyst Briefs**: Professional 2-3 page reports with KPIs, insights, and complete source attribution
 
 > **Built for**: Investment analysts, portfolio managers, financial advisors, and individual investors seeking data-driven insights
 
@@ -57,7 +57,7 @@ This system revolutionizes the investment research process by:
 - **Risk Ranges**: Upside/downside targets with uncertainty quantification
 - **Confidence Scoring**: HIGH (>70%), MEDIUM (50-70%), LOW (30-50%) with transparent methodology
 
-### 📊 Interactive Visualizations
+### Interactive Visualizations
 - **Unified Price Chart**:
   - Candlestick or line chart toggle
   - Historical OHLC data with 1Y lookback
@@ -71,7 +71,7 @@ This system revolutionizes the investment research process by:
   - Timeline filtering without page refresh
 - **Responsive Design**: Powered by Plotly for smooth, professional charts
 
-### 📰 Multi-Source News Aggregation
+### Multi-Source News Aggregation
 - **Diverse Sources**: 
   - Yahoo Finance API (primary news)
   - MarketWatch RSS feeds (market commentary)
@@ -80,7 +80,7 @@ This system revolutionizes the investment research process by:
 - **Sentiment Diversity**: Improved distribution beyond neutral baseline
 - **8-K Event Integration**: Material events included as high-priority "news"
 
-### 📋 8-K Material Event Parsing
+### 8-K Material Event Parsing
 - **25 Item Types**: Comprehensive parsing of all standard 8-K items (1.01 to 9.01)
 - **Event Categories**:
   - Material agreements, completed acquisitions
@@ -91,7 +91,7 @@ This system revolutionizes the investment research process by:
 - **Smart Summarization**: Human-readable event descriptions (e.g., "Leadership Change: New CEO appointed")
 - **RAG Integration**: 8-K content indexed for semantic search and citation generation
 
-### 💹 FinBERT Sentiment Analysis
+### FinBERT Sentiment Analysis
 - **Pre-trained Model**: ProsusAI/finbert (specialized for financial text)
 - **Zero-shot Classification**: No fine-tuning required, production-ready
 - **Confidence Metrics**: 95% bootstrap confidence intervals for aggregated sentiment
@@ -114,7 +114,7 @@ This system revolutionizes the investment research process by:
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -158,7 +158,7 @@ This system revolutionizes the investment research process by:
 4. **Visualization**: FinancialCharts class → Plotly charts → Historical + Predicted data
 5. **Output**: ReporterAgent assembles → Markdown/PDF report → Display in UI
 
-## 📦 Installation
+## Installation
 
 ### Prerequisites
 - **Python 3.12+** (recommended: 3.12.0)
@@ -213,7 +213,7 @@ Create a `.env` file in the project root:
 Copy example(.env.example) file
 Edit `.env` with your credentials
 
-## 🚀 Usage
+## Usage
 
 ### Quick Start - Streamlit Web UI (Recommended)
 
@@ -233,16 +233,16 @@ The app will open in your browser at `http://localhost:8501`
 
 1. **Enter Stock Ticker**: Type a symbol (e.g., `NVDA`, `AAPL`, `TSLA`)
 2. **Configure Options**:
-   - ✅ **Use cached data**: Skip re-downloading if data exists (faster)
-   - 📅 **Days to look back**: How many days of news/filings to fetch (default: 365)
-   - 📄 **Report format**: Choose markdown or PDF output
+   - **Use cached data**: Skip re-downloading if data exists (faster)
+   - **Days to look back**: How many days of news/filings to fetch (default: 365)
+   - **Report format**: Choose markdown or PDF output
 3. **Generate Brief**: Click the red "🚀 Generate Brief" button
 4. **Explore Results**:
-   - **📊 Report Tab**: Full analyst brief with ratings and predictions
-   - **📈 Charts Tab**: Interactive price chart with AI predictions
-   - **📉 Metrics Tab**: Key financial metrics and ratios
-   - **💹 Sentiment Tab**: News sentiment analysis and distribution
-   - **📰 Sources Tab**: All data sources with links
+   - **Report Tab**: Full analyst brief with ratings and predictions
+   - **Charts Tab**: Interactive price chart with AI predictions
+   - **Metrics Tab**: Key financial metrics and ratios
+   - **Sentiment Tab**: News sentiment analysis and distribution
+   - **Sources Tab**: All data sources with links
 
 **Expected Output**:
 - **Investment Rating**: BUY/HOLD/SELL with composite score (0-100)
@@ -361,7 +361,7 @@ SHORT_TERM_UNCERTAINTY = 0.05       # ±5% for 7-day predictions
 ```
 
 
-## 🔍 Data Sources & APIs
+## Data Sources & APIs
 
 ### SEC EDGAR (Official U.S. Securities and Exchange Commission)
 - **Base URL**: `https://data.sec.gov/`
@@ -408,9 +408,7 @@ SHORT_TERM_UNCERTAINTY = 0.05       # ±5% for 7-day predictions
 
 ## ⚠️ Limitations & Disclaimers
 
-### Important Legal Disclaimers
-
-**🚨 NOT INVESTMENT ADVICE**: This tool is for **educational and research purposes only**. The reports, ratings, predictions, and recommendations generated by this system are NOT professional investment advice and should NOT be used as the sole basis for making investment decisions.
+**NOT INVESTMENT ADVICE**: This tool is for **educational and research purposes only**. The reports, ratings, predictions, and recommendations generated by this system are NOT professional investment advice and should NOT be used as the sole basis for making investment decisions.
 
 ### Ethical Considerations
 
@@ -432,7 +430,7 @@ SHORT_TERM_UNCERTAINTY = 0.05       # ±5% for 7-day predictions
 - Consult licensed financial professionals for advice
 
 
-## Acknowledgments
+## 🔍 Acknowledgments
 
 This project leverages several outstanding open-source tools and data sources:
 

@@ -100,17 +100,17 @@ This system revolutionizes the investment research process by:
 ## 🖼️ Screenshots
 
 ### Main Dashboard
-![Dashboard](ss/dashboard.jpg)
+![Dashboard](Images/dashboard.jpg)
 
 ### Interactive Price Chart with AI Predictions
-![Candlestick Graph](ss/CandlestickGraph.jpg)
+![Candlestick Graph](Images/CandlestickGraph.jpg)
 
 ### Generated Analyst Brief
-![Summary Part 1](ss/Summary1.jpg)
-![Summary Part 2](ss/Summary2.jpg)
+![Summary Part 1](Images/Summary1.jpg)
+![Summary Part 2](Images/Summary2.jpg)
 
 ### Forward Outlook & Predictions
-![Summary Part 3](ss/Summary3.jpg)
+![Summary Part 3](Images/Summary3.jpg)
 
 ---
 

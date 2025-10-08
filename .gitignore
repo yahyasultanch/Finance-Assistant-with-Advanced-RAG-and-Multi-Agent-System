@@ -39,7 +39,6 @@ ENV/
 data/
 models/
 index/
-ss/
 reports/
 *.faiss
 *.pkl

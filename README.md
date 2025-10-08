@@ -1,6 +1,6 @@
 # 🤖 AI Investment Research Assistant
 
-**Advanced RAG + Multi-Agent System + AI-Powered Financial Analysis**
+**Advanced RAG + Multi-Agent System + AI-Powered Financial Analysis and Prediction**
 
 An enterprise-grade intelligent system that automates investment research by combining SEC filings, financial news, and AI-driven analysis to generate comprehensive analyst briefs with actionable investment recommendations, predictive forecasts, and interactive visualizations.
 

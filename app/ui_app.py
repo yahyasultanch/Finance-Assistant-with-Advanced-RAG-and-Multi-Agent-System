@@ -107,13 +107,6 @@ def main():
         
         st.divider()
         
-        st.markdown("### 🔧 System Info")
-        st.info(f"""
-        **Azure OpenAI Model:** {AZURE_OPENAI_DEPLOYMENT}
-        **Embedding:** text-embedding-ada-002
-        **FinBERT:** {FINBERT_MODEL.split('/')[-1]}
-        """)
-        
         # Generate brief button
         generate_button = st.button("🚀 Generate Brief", type="primary", use_container_width=True)
         
@@ -392,25 +385,6 @@ def main():
         **Note:** First-time generation for a ticker may take 30-60 seconds. 
         Subsequent runs with cache enabled will be much faster.
         """)
-        
-        # System requirements
-        with st.expander("⚙️ System Requirements"):
-            st.markdown("""
-            **Required:**
-            - Python 3.12+
-            - Azure OpenAI API access
-            - Internet connection for SEC EDGAR and news
-            
-            **Models:**
-            - LLM: Azure OpenAI GPT-4o-mini
-            - Embeddings: Azure OpenAI text-embedding-ada-002
-            - Sentiment: FinBERT (`ProsusAI/finbert`)
-            
-            **Configuration:**
-            - Set Azure OpenAI credentials in `.env` file
-            - See `QUICKSTART_AZURE.md` for setup guide
-            """)
-
 
 if __name__ == "__main__":
     main()

@@ -37,7 +37,9 @@ ENV/
 
 # Data and cache
 data/
+models/
 index/
+ss/
 reports/
 *.faiss
 *.pkl

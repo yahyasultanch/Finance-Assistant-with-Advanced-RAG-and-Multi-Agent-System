@@ -294,6 +294,7 @@ FinanceAnalyst/
 │   └── ...
 ├── config.py                         # Configuration settings and paths
 ├── requirements.txt                  # Python dependencies
+├── pyproject.toml                    # Project metadata
 ├── .env.example                      # Environment variables template
 ├── .env                              # Your credentials (gitignored, create this!)
 ├── .gitignore                        # Git ignore rules

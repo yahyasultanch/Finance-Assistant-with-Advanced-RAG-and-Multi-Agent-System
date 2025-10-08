@@ -44,8 +44,6 @@ reports/
 *.faiss
 *.pkl
 *.db
-*.md
-*.toml
 
 # Jupyter
 .ipynb_checkpoints/

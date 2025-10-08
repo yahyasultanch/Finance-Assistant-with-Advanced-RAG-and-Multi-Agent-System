@@ -324,7 +324,7 @@ FINBERT_MODEL = "ProsusAI/finbert"          # Pre-trained financial sentiment mo
 
 ### SEC Configuration
 ```python
-# SEC EDGAR API (REQUIRED)
+# SEC EDGAR API
 SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "YourName your.email@example.com")
 SEC_BASE_URL = "https://data.sec.gov"
 SEC_RATE_LIMIT = 10  # Requests per second (SEC enforced)

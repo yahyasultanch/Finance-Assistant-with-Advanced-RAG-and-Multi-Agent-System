@@ -106,11 +106,11 @@ This system revolutionizes the investment research process by:
 ![Candlestick Graph](ss/CandlestickGraph.jpg)
 
 ### Generated Analyst Brief
-![Summary Part 1](ss/summary1.jpg)
-![Summary Part 2](ss/summary2.jpg)
+![Summary Part 1](ss/Summary1.jpg)
+![Summary Part 2](ss/Summary2.jpg)
 
 ### Forward Outlook & Predictions
-![Summary Part 3](ss/summary3.jpg)
+![Summary Part 3](ss/Summary3.jpg)
 
 ---
 

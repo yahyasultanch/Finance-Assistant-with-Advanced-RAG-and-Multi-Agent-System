@@ -28,6 +28,23 @@ def contextual_header(metadata: Dict[str, Any]) -> str:
     return f"{ticker} {form} (filed {date}){section}"
 
 
+SAFE_HARBOR = re.compile(
+    r"forward-looking statements|section 27a|section 21e|private securities litigation reform"
+    r"|undertake no obligation|materially different|similar expressions|safe harbor",
+    re.IGNORECASE,
+)
+
+
+def is_safe_harbor(text: str) -> bool:
+    """
+    Forward-looking-statement disclaimers ("statements as to: growth, demand,
+    ... are forward-looking statements within the meaning of Section 27A").
+    They list topics without stating anything, yet match outlook and guidance
+    queries well, so they crowded real guidance out of retrieval.
+    """
+    return len({m.lower() for m in SAFE_HARBOR.findall(text)}) >= 2
+
+
 def indexed_text(doc: Dict[str, Any]) -> str:
     """Text used for embedding, BM25 and reranking: header plus chunk."""
     context = doc.get("context", "")
@@ -141,8 +158,8 @@ class DocumentChunker:
         else:
             # Chunk entire filing
             all_chunks = self.chunk_text(filing_text, filing_metadata)
-        
-        return all_chunks
+
+        return [chunk for chunk in all_chunks if not is_safe_harbor(chunk["text"])]
 
     def _clean_text(self, text: str) -> str:
         """Clean and normalize text."""

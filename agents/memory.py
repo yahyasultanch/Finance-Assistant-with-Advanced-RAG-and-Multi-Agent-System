@@ -12,7 +12,8 @@ records instead of double-counting them.
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-# Ledger entry kind -> horizon in days
+# Ledger entry kind -> horizon in days ("rating_target" only appears in
+# ledgers from before the rating adopted the 12-month forecast as its target)
 HORIZONS = {"7d": 7, "12m": 365, "rating_target": 365}
 
 
@@ -61,14 +62,13 @@ def format_memory(briefs: Sequence[Dict[str, Any]], claims_per_section: int = 2)
     return "\n\n".join(blocks)
 
 
-def ledger_entries_for(ticker: str, made_on: str, price: float, rating: Dict[str, Any],
+def ledger_entries_for(ticker: str, made_on: str, price: float,
                        prediction: Dict[str, Any]) -> List[Dict[str, Any]]:
     """The price calls one brief makes, ready to store (`prediction` is PredictiveEngine output)."""
     horizons = prediction.get("predictions", {})
     targets = {
         "7d": horizons.get("short_term", {}).get("target_price"),
         "12m": horizons.get("long_term", {}).get("target_price"),
-        "rating_target": rating.get("price_target"),
     }
     due = date.fromisoformat(made_on)
     return [

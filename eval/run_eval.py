@@ -137,15 +137,7 @@ def retrieval_eval(tickers):
 
 def brief_eval(tickers):
     from agents.orchestrator import Orchestrator
-    orc = Orchestrator(
-        sec_user_agent=config.SEC_USER_AGENT, data_dir=config.DATA_DIR, index_dir=config.INDEX_DIR,
-        reports_dir=config.REPORTS_DIR, embedding_model_name="",
-        azure_endpoint=config.AZURE_OPENAI_ENDPOINT, azure_key=config.AZURE_OPENAI_KEY,
-        azure_deployment=config.AZURE_OPENAI_DEPLOYMENT,
-        azure_embedding_deployment=config.AZURE_EMBEDDING_DEPLOYMENT,
-        azure_embedding_key=config.AZURE_EMBEDDING_KEY, api_version=config.AZURE_OPENAI_API_VERSION,
-        finbert_model=config.FINBERT_MODEL, reranker_model=config.RERANKER_MODEL,
-    )
+    orc = Orchestrator.from_config()
     rows = []
     for ticker in tickers:
         start = time.time()

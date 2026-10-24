@@ -6,9 +6,9 @@ Tickers: NVDA, AAPL · 24 answerable question-ticker pairs (12 questions) · run
 
 | Setup | hit@5 | MRR@10 | P@5 |
 |-------|-------|--------|-----|
-| BM25 only | 0.88 | 0.78 | 0.62 |
-| Semantic only | 0.96 | 0.93 | 0.85 |
-| Hybrid (RRF) | 0.96 | 0.91 | 0.83 |
+| BM25 only | 0.92 | 0.81 | 0.65 |
+| Semantic only | 0.92 | 0.92 | 0.83 |
+| Hybrid (RRF) | 0.92 | 0.90 | 0.82 |
 | Hybrid + contextual headers | 0.96 | 0.94 | 0.89 |
 | Hybrid + headers + reranker (cross-encoder/ms-marco-MiniLM-L-6-v2) | 0.96 | 0.90 | 0.82 |
 
@@ -16,5 +16,5 @@ Tickers: NVDA, AAPL · 24 answerable question-ticker pairs (12 questions) · run
 
 | Ticker | Claims | Verified | First draft | Final | Revisions | LLM calls | Tokens | Seconds |
 |--------|--------|----------|-------------|-------|-----------|-----------|--------|---------|
-| NVDA | 17 | 15 | 88% | 88% | 0 | 18 | 34,223 | 27 |
-| AAPL | 17 | 15 | 88% | 88% | 0 | 17 | 27,876 | 29 |
+| NVDA | 15 | 14 | 93% | 93% | 0 | 16 | 26,973 | 32 |
+| AAPL | 19 | 17 | 89% | 89% | 0 | 16 | 30,578 | 27 |

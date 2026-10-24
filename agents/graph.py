@@ -289,7 +289,9 @@ def build_brief_graph(orc, checkpointer=None, store=None):
                 "facts in the research notes. Each claim is one specific sentence (figures, dates, "
                 "names) citing the source ids from the notes that directly support it. Copy figures "
                 "exactly as they appear in the notes. Never cite an id that is not in the notes. "
-                "XBRL figures are reported results, never projections. If the notes have no "
+                "XBRL figures are reported results, never projections. SOCIAL sources (Hacker "
+                "News, Reddit) are opinion: use them only to say what people are discussing, "
+                "never as evidence for a fact. If the notes have no "
                 "evidence for a section, return an empty list for it; never write claims about "
                 "missing evidence. "
                 'Respond in JSON: {"overview": [{"text": "...", "sources": ["S1a2b3c"]}], '
@@ -397,7 +399,7 @@ def build_brief_graph(orc, checkpointer=None, store=None):
         price = result["price_metrics"].get("current_price") or 0.0
         rating, prediction = state["scores"]["rating"], state["scores"]["prediction"]
         mem.remember_brief(store, mem.brief_record(ticker, today, price, rating, state["verification"]))
-        entries = mem.ledger_entries_for(ticker, today, price, rating, prediction)
+        entries = mem.ledger_entries_for(ticker, today, price, prediction)
         mem.record_predictions(store, entries)
         return {
             "result": {**result, "track_record": track_record},

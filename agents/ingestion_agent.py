@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 # v2: section-aware chunks from real headers, 8-K exhibits, news title/summary metadata
 # v3: contextual chunk headers in embeddings and BM25
-INDEX_VERSION = 3
+# v4: safe-harbor disclaimers dropped, Yahoo news filtered to the company
+INDEX_VERSION = 4
 
 
 class IngestionAgent:

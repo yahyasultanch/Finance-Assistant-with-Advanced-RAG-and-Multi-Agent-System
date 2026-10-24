@@ -12,13 +12,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # Configure logging
 logger = logging.getLogger(__name__)
 
-from config import (
-    DATA_DIR, INDEX_DIR, REPORTS_DIR,
-    SEC_USER_AGENT, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY,
-    AZURE_OPENAI_DEPLOYMENT, AZURE_EMBEDDING_DEPLOYMENT, AZURE_EMBEDDING_KEY,
-    AZURE_OPENAI_API_VERSION, FINBERT_MODEL, RERANKER_MODEL,
-    CHUNK_SIZE, CHUNK_OVERLAP, TOP_K_RETRIEVAL
-)
 from agents.orchestrator import Orchestrator
 from utils.visualizations import FinancialCharts
 
@@ -39,24 +32,7 @@ st.set_page_config(
 @st.cache_resource
 def get_orchestrator():
     """Initialize and cache orchestrator."""
-    return Orchestrator(
-        sec_user_agent=SEC_USER_AGENT,
-        data_dir=DATA_DIR,
-        index_dir=INDEX_DIR,
-        reports_dir=REPORTS_DIR,
-        embedding_model_name="text-embedding-ada-002",  # kept for compatibility
-        azure_endpoint=AZURE_OPENAI_ENDPOINT,
-        azure_key=AZURE_OPENAI_KEY,
-        azure_deployment=AZURE_OPENAI_DEPLOYMENT,
-        azure_embedding_deployment=AZURE_EMBEDDING_DEPLOYMENT,
-        azure_embedding_key=AZURE_EMBEDDING_KEY,
-        api_version=AZURE_OPENAI_API_VERSION,
-        finbert_model=FINBERT_MODEL,
-        reranker_model=RERANKER_MODEL,
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-        top_k=TOP_K_RETRIEVAL
-    )
+    return Orchestrator.from_config()
 
 
 def render_review(review):
@@ -342,7 +318,7 @@ def main():
                 prediction_results = result.get("prediction_results", {})
                 
                 # Chart controls
-                col1, col2 = st.columns([1, 4])
+                col1, col2, col3 = st.columns([1, 3, 1])
                 
                 with col1:
                     chart_type = st.radio(
@@ -355,10 +331,16 @@ def main():
                 with col2:
                     time_range = st.radio(
                         "Time Range",
-                        options=["1W", "1M", "3M", "6M", "1Y", "ALL"],
+                        options=["1W", "1M", "3M", "6M", "1Y", "2Y"],
                         index=4,  # Default to 1Y
                         horizontal=True,
                         help="Select historical time range"
+                    )
+                
+                with col3:
+                    show_long_term = st.checkbox(
+                        "12M target", value=True,
+                        help="Show the 12-month target and its risk range as a level"
                     )
                 
                 # Create and display main chart
@@ -367,20 +349,20 @@ def main():
                     ticker=ticker,
                     predictions=prediction_results,
                     chart_type=chart_type.lower(),
-                    time_range=time_range
+                    time_range=time_range,
+                    show_long_term=show_long_term
                 )
                 st.plotly_chart(main_fig, use_container_width=True, key="main_price_chart")
                 
                 # Legend explanation
                 st.markdown("""
                 **Chart Legend:**
-                - **Solid Line/Candles**: Historical price data
-                - **Dotted Purple Line**: Short-term prediction (7 days)
-                - **Dashed Purple Line**: Long-term prediction (12 months)
-                - **Shaded Area**: Risk-adjusted range (upside/downside)
-                - **Volume Bars**: Trading volume (green = up day, red = down day)
+                - **Candles / line**: daily price history
+                - **Dotted purple line**: 7-day forecast, drawn from the last close
+                - **Dashed purple level**: 12-month target (same number as the rating), shaded band = ±15% risk range
+                - **Volume bars**: green = up day, red = down day
                 
-                💡 **Tip**: Use the range selector buttons above the chart or the timeline controls to adjust the view.
+                Forecasts are heuristic scenarios, not advice; see the Track Record tab for how past calls turned out.
                 """)
             
             with tab3:
@@ -395,12 +377,14 @@ def main():
                     st.metric(
                         "Current Price",
                         f"${price_metrics.get('current_price', 0):.2f}",
-                        delta=f"{price_metrics.get('ytd_return', 0):.2f}% YTD"
+                        delta=f"{price_metrics.get('ytd_return', 0):.2f}% 1Y"
                     )
                 
                 with col2:
                     market_cap = company_info.get("market_cap", 0)
-                    if market_cap > 1e9:
+                    if market_cap > 1e12:
+                        st.metric("Market Cap", f"${market_cap/1e12:.2f}T")
+                    elif market_cap > 1e9:
                         st.metric("Market Cap", f"${market_cap/1e9:.2f}B")
                     else:
                         st.metric("Market Cap", f"${market_cap/1e6:.2f}M")

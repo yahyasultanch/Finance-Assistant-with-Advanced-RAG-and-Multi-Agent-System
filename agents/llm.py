@@ -4,7 +4,13 @@ The tool loop is written out by hand (no agent framework) to keep the
 protocol visible: the model returns tool_calls, we run them (in parallel),
 send each result back as a "tool" message, and repeat until the model
 answers in text or the step budget runs out.
+
+Tracing: with LANGSMITH_TRACING=true and LANGSMITH_API_KEY set, LangGraph
+traces each graph node, and the wrapped client and @traceable spans below add
+every LLM call (prompts, tokens) and tool call under the node that made it.
+With tracing off these are pass-throughs.
 """
+import contextvars
 import json
 import logging
 import threading
@@ -13,6 +19,8 @@ from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar
 
+from langsmith import traceable
+from langsmith.wrappers import wrap_openai
 from openai import AzureOpenAI
 from pydantic import BaseModel, ValidationError
 
@@ -55,7 +63,7 @@ class LLM:
     """Thin client with token accounting shared across threads."""
 
     def __init__(self, endpoint: str, key: str, deployment: str, api_version: str):
-        self.client = AzureOpenAI(azure_endpoint=endpoint, api_key=key, api_version=api_version)
+        self.client = wrap_openai(AzureOpenAI(azure_endpoint=endpoint, api_key=key, api_version=api_version))
         self.deployment = deployment
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
         self._lock = threading.Lock()
@@ -114,6 +122,7 @@ class LLM:
                 ]
         raise AssertionError("unreachable")
 
+    @traceable(run_type="chain", name="tool_loop")
     def run_tools(
         self,
         messages: List[Dict[str, Any]],
@@ -144,9 +153,11 @@ class LLM:
                 "content": message.content,
                 "tool_calls": [call.model_dump() for call in message.tool_calls],
             })
-            # The model may request several calls in one turn; run them concurrently
+            # The model may request several calls in one turn; run them concurrently.
+            # Each worker runs in a copy of this thread's context, so trace spans nest correctly.
+            calls = [(contextvars.copy_context(), call) for call in message.tool_calls]
             with ThreadPoolExecutor(max_workers=4) as pool:
-                results = list(pool.map(lambda call: self._run_call(call, tools), message.tool_calls))
+                results = list(pool.map(lambda c: c[0].run(self._run_call, c[1], tools), calls))
             for call, (output, entry) in zip(message.tool_calls, results):
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": output.text})
                 sources.extend(output.sources)
@@ -164,7 +175,7 @@ class LLM:
         try:
             if tool is None:
                 raise ValueError(f"Unknown tool {name!r}. Available: {sorted(tools)}")
-            output = tool.invoke(raw_args)
+            output = traceable(run_type="tool", name=name)(tool.invoke)(raw_args)
             error = None
         except Exception as e:  # any failure becomes an observation for the model
             output = ToolOutput(text=f"ERROR: {type(e).__name__}: {e}")

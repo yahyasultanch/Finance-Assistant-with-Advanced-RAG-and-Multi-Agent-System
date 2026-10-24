@@ -294,9 +294,9 @@ class RatingEngine:
         # Growth momentum
         ytd_return = price_data.get("ytd_return", 0)
         if ytd_return > 20:
-            reasoning.append(f"**Strong momentum**: YTD return of {ytd_return:.1f}% demonstrates robust market performance")
+            reasoning.append(f"**Strong momentum**: 1-year return of {ytd_return:.1f}% demonstrates robust market performance")
         elif ytd_return < -10:
-            reasoning.append(f"**Underperformance**: YTD return of {ytd_return:.1f}% raises concerns about near-term prospects")
+            reasoning.append(f"**Underperformance**: 1-year return of {ytd_return:.1f}% raises concerns about near-term prospects")
         
         # Sentiment reasoning
         if sentiment_score >= 65:

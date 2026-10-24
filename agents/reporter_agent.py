@@ -285,7 +285,7 @@ class ReporterAgent:
                 snapshot += f"| **Market Cap** | ${market_cap/1e6:.2f}M |\n"
         
         if "ytd_return" in price_metrics:
-            snapshot += f"| **YTD Return** | {price_metrics['ytd_return']:.2f}% |\n"
+            snapshot += f"| **1-Year Return** | {price_metrics['ytd_return']:.2f}% |\n"
         
         if "52_week_high" in price_metrics:
             snapshot += f"| **52-Week High** | ${price_metrics['52_week_high']:.2f} |\n"
@@ -418,7 +418,7 @@ class ReporterAgent:
         # Long-term prediction
         long_term = predictions.get("long_term", {})
         if long_term:
-            section += "### � Long-Term Forecast (3-12 Months)\n\n"
+            section += "### 🔭 Long-Term Forecast (12 Months)\n\n"
             section += f"**Target Price:** ${long_term.get('target_price', 0):.2f}\n\n"
             
             # Show risk-adjusted range if available

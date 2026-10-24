@@ -31,38 +31,63 @@ This system revolutionizes the investment research process by:
 ### Agent Memory
 - **Short-term**: the SQLite checkpointer holds each brief run (resumable after review) and each chat thread
 - **Long-term**: a LangGraph `Store` (SQLite), injected into nodes, keeps every published brief per ticker. The planner loads earlier briefs and registers them as a citable source; the analyst writes a verified "Changes Since Last Brief" section; the chat agent sees the ticker's history
-- **Prediction ledger**: every 7-day, 12-month and rating price-target call is logged with the price when it was made, then scored against actual closes once due (direction hit rate, mean absolute error). The score feeds back into the next report and the Track Record tab
+- **Prediction ledger**: every 7-day and 12-month price call is logged (the 12-month forecast is also the rating's price target, so there is one target everywhere) with the price when it was made, then scored against actual closes once due (direction hit rate, mean absolute error). The score feeds back into the next report and the Track Record tab
 - **Agent trace**: Every tool call (args, latency, sources returned, errors) and token usage is recorded and shown in the UI
 
 ### Tool Calling
 - Tools are typed: Pydantic argument models become OpenAI function schemas
 - The tool loop is hand-written (`agents/llm.py`) to keep the protocol visible: parallel `tool_calls` run concurrently, tool errors go back to the model as observations, and a step budget forces a final answer
-- Tools: `search_filings` (hybrid search with form/section filters), `get_financial_metrics` (SEC XBRL), `get_recent_events` (8-K items), `get_news`, `get_price_summary`
+- Tools: `search_filings` (hybrid search with form/section filters), `get_financial_metrics` (SEC XBRL), `get_recent_events` (8-K items), `get_news`, `get_discussions` (Hacker News, plus Reddit when configured), `get_price_summary`
 - Empty results say what *is* indexed, so the agent can retry with filters that exist
+- Community discussion is tagged as the *social* tier: the analyst may report what people are discussing, never use it as evidence for a fact
+
+### MCP Server
+`mcp_server.py` serves the same research tools over the Model Context Protocol (stdio), so Claude Desktop, Claude Code or any MCP client can use them. Every research tool takes a `ticker` argument, and two more run the full pipeline: `generate_brief` (the whole verified-brief graph) and `get_track_record` (remembered briefs and how their forecasts scored). The tools' Pydantic schemas become the MCP input schemas, so the agents and MCP clients share one definition. Models load on the first call, logs go to stderr (stdout carries the protocol), and tool errors come back as error results the client model can react to.
+
+```json
+{
+  "mcpServers": {
+    "finance-analyst": {
+      "command": "C:/path/to/FinanceAnalyst/venv/Scripts/python.exe",
+      "args": ["C:/path/to/FinanceAnalyst/mcp_server.py"]
+    }
+  }
+}
+```
+
+### Observability (LangSmith)
+Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` to trace every run: LangGraph traces each node, and the wrapped OpenAI client plus `@traceable` spans add every LLM call (prompt, tokens) and tool call under the node that made it. Parallel tool calls run in a copied `contextvars` context so their spans nest correctly. Runs are named by thread and tagged `brief` or `chat`. With tracing off, the spans do nothing, and the in-app Agent Trace tab still shows tool calls and token usage.
 
 ### Advanced RAG Pipeline
 - **Section-aware chunking**: 10-K/10-Q sections found from their real headers (skipping table-of-contents entries and cross-references); ~1000-character chunks with 100-character overlap
 - **8-K exhibits**: EX-99.x press releases and CFO commentary are indexed, not just the 8-K cover page
 - **Contextual chunk headers**: each chunk is embedded and BM25-indexed with a header like `NVDA 10-K (filed 2026-02-25) · Risk Factors`, so queries can match company, form, period and section
+- **Safe-harbor filtering**: forward-looking-statement disclaimers ("...are forward-looking statements within the meaning of Section 27A...") are dropped at chunking. They list topics like growth and demand without saying anything, yet match outlook queries well, so they used to push real guidance out of the results. A chunk is dropped when it has 2 or more distinct disclaimer phrases, so guidance sentences that only mention "expected" stay
 - **Hybrid retrieval**: BM25 + Azure OpenAI embeddings fused with weighted Reciprocal Rank Fusion, with metadata filters (form type, section)
 - **Optional cross-encoder reranker** (`RERANKER_MODEL`): rescores the fused candidates locally. Off by default, because the evaluation below showed it doesn't help on this corpus
-- **FAISS vector store**: Versioned, persisted indexes, rebuilt automatically when older than 7 days
+- **FAISS vector store**: Versioned, persisted indexes (currently v4), rebuilt automatically when older than 7 days or when the index version changes
 
 ### Evaluation
-`python eval/run_eval.py NVDA AAPL [--briefs]` runs a retrieval ablation over 12 generic analyst questions with silver relevance labels (expected form/section + keyword pattern), and optionally full briefs. Latest run ([eval/results.md](eval/results.md)), 24 question-ticker pairs:
+`python eval/run_eval.py NVDA AAPL [--briefs]` runs a retrieval ablation over 12 generic analyst questions with silver relevance labels (expected form/section + keyword pattern), and optionally full briefs. Latest run on the v4 index ([eval/results.md](eval/results.md)), 24 question-ticker pairs:
 
 | Setup | hit@5 | MRR@10 | P@5 |
 |-------|-------|--------|-----|
-| BM25 only | 0.88 | 0.78 | 0.62 |
-| Semantic only | 0.96 | 0.93 | 0.85 |
-| Hybrid (RRF) | 0.96 | 0.91 | 0.83 |
-| **Hybrid + contextual headers** (default) | 0.96 | **0.94** | **0.89** |
+| BM25 only | 0.92 | 0.81 | 0.65 |
+| Semantic only | 0.92 | 0.92 | 0.83 |
+| Hybrid (RRF) | 0.92 | 0.90 | 0.82 |
+| **Hybrid + contextual headers** (default) | **0.96** | **0.94** | **0.89** |
 | + reranker, ms-marco-MiniLM-L-6-v2 | 0.96 | 0.90 | 0.82 |
-| + reranker, bge-reranker-base | 0.96 | 0.89 | 0.87 |
 
-Takeaways: contextual headers give the best ranking (+0.06 P@5 over plain hybrid); neither general-purpose reranker beats them on SEC text, so reranking stays opt-in. Hybrid trails semantic-only slightly here because BM25 is weak on these natural-language questions. The question set is small and hit@5 is near ceiling, so treat differences under ~0.03 as noise.
+Takeaways: contextual headers give the best ranking (+0.07 P@5 and +0.04 MRR over plain hybrid). The cross-encoder undoes that gain on SEC text; `bge-reranker-base`, measured on the v3 index, didn't help either (MRR 0.89), so reranking stays opt-in. Plain hybrid trails semantic-only slightly because BM25 is weak on these natural-language questions; the headers are what make the fusion pay off. The question set is small and hit@5 is near its ceiling, so treat differences under ~0.03 as noise.
 
-End-to-end briefs (same run): NVDA and AAPL each drafted 17 claims with 88% verified on the first pass, using 17-18 LLM calls and ~28-34k tokens (under a cent each on gpt-4o-mini).
+End-to-end briefs (same run):
+
+| Ticker | Claims | Verified | Revisions | LLM calls | Tokens | Seconds |
+|--------|--------|----------|-----------|-----------|--------|---------|
+| NVDA | 15 | 14 (93%) | 0 | 16 | 26,973 | 32 |
+| AAPL | 19 | 17 (89%) | 0 | 16 | 30,578 | 27 |
+
+Both drafts cleared the 80% threshold on the first pass, so the revision loop didn't trigger (the graph tests cover it). Each brief costs under a cent on gpt-4o-mini.
 
 ### Sources and Citations
 - **Source registry**: Every tool result becomes sources with content-hash ids (`[S3f9a2c]`), so parallel agents never collide
@@ -99,12 +124,11 @@ End-to-end briefs (same run): NVDA and AAPL each drafted 17 claims with 88% veri
 ### Interactive Visualizations
 - **Unified Price Chart**:
   - Candlestick or line chart toggle
-  - Historical OHLC data with 1Y lookback
-  - 7-day prediction (dotted purple line)
-  - 12-month prediction (dashed purple line)
-  - Risk-adjusted ranges (shaded confidence bands)
+  - Historical OHLC data with 2Y lookback
+  - 7-day forecast (dotted purple line from the last close)
+  - 12-month target as a dashed level, with its ±15% risk range shaded (toggle "12M target")
   - Volume bars subplot
-  - Time range selectors: 1W, 1M, 3M, 6M, 1Y, ALL
+  - Time range selectors: 1W, 1M, 3M, 6M, 1Y, 2Y
 - **Interactive Controls**: 
   - Chart type switcher (Candlestick ↔ Line)
   - Timeline filtering without page refresh
@@ -115,6 +139,8 @@ End-to-end briefs (same run): NVDA and AAPL each drafted 17 claims with 88% veri
   - Yahoo Finance API (primary news)
   - MarketWatch RSS feeds (market commentary)
   - SEC 8-K material events (official disclosures)
+  - Hacker News (keyless Algolia API, searched live by company name) and Reddit (optional, `REDDIT_CLIENT_ID`/`SECRET`) as a separate *community discussion* channel
+- **Relevance filter**: a Yahoo story has to name the company or ticker; market roundups that merely tag it are dropped
 - **Smart Deduplication**: Filters duplicate headlines across sources
 - **Sentiment Diversity**: Improved distribution beyond neutral baseline
 - **8-K Event Integration**: Material events included as high-priority "news"
@@ -356,8 +382,8 @@ FinanceAnalyst/
 │   └── NVDA/
 │       └── ...
 ├── index/                            # FAISS vector indexes (gitignored)
-│   ├── aapl_v2.faiss
-│   ├── aapl_v2.pkl
+│   ├── aapl_v4.faiss
+│   ├── aapl_v4.pkl
 │   └── ...
 ├── tests/                            # pytest: retrieval, sections, citations, memory, graph flow (no API calls)
 ├── eval/
@@ -367,6 +393,7 @@ FinanceAnalyst/
 │   ├── AAPL_analyst_brief_2024-10-07.md
 │   ├── AAPL_analyst_brief_2024-10-07.pdf
 │   └── ...
+├── mcp_server.py                     # MCP server exposing the research tools (stdio)
 ├── config.py                         # Configuration settings and paths
 ├── requirements.txt                  # Python dependencies
 ├── pyproject.toml                    # Project metadata
@@ -396,7 +423,7 @@ FinanceAnalyst/
 python -m pytest -q
 ```
 
-The graph tests drive the full LangGraph flow (fan-out, verifier revision loop, interrupt and resume, memory carried between runs) with a stub LLM, so they need no API keys.
+21 tests. The graph tests drive the full LangGraph flow (fan-out, verifier revision loop, interrupt and resume, memory carried between runs) with a stub LLM, so they need no API keys. Others cover retrieval and RRF, citation checks, the MCP tool listing, safe-harbor filtering and news relevance.
 
 
 ### Models

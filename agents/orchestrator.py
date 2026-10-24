@@ -118,6 +118,28 @@ class Orchestrator:
 
     # Data and tools, looked up by graph nodes
 
+    @classmethod
+    def from_config(cls) -> "Orchestrator":
+        """Build from config.py / .env (used by the UI, the MCP server and the eval)."""
+        import config
+        return cls(
+            sec_user_agent=config.SEC_USER_AGENT,
+            data_dir=config.DATA_DIR,
+            index_dir=config.INDEX_DIR,
+            reports_dir=config.REPORTS_DIR,
+            embedding_model_name="",
+            azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
+            azure_key=config.AZURE_OPENAI_KEY,
+            azure_deployment=config.AZURE_OPENAI_DEPLOYMENT,
+            azure_embedding_deployment=config.AZURE_EMBEDDING_DEPLOYMENT,
+            azure_embedding_key=config.AZURE_EMBEDDING_KEY,
+            api_version=config.AZURE_OPENAI_API_VERSION,
+            finbert_model=config.FINBERT_MODEL,
+            reranker_model=config.RERANKER_MODEL,
+            chunk_size=config.CHUNK_SIZE,
+            chunk_overlap=config.CHUNK_OVERLAP,
+        )
+
     def load_context(
         self,
         ticker: str,
@@ -206,8 +228,8 @@ class Orchestrator:
         price_data = {
             "current_price": ctx.price_metrics.get("current_price", 0),
             "ytd_return": ctx.price_metrics.get("ytd_return", 0),
-            "high_52w": ctx.price_metrics.get("high_52w", 0),
-            "low_52w": ctx.price_metrics.get("low_52w", 0),
+            "high_52w": ctx.price_metrics.get("52_week_high", 0),
+            "low_52w": ctx.price_metrics.get("52_week_low", 0),
             "volatility": ctx.price_metrics.get("volatility", 30)
         }
         rating_results = self.rating_engine.calculate_rating(
@@ -226,6 +248,12 @@ class Orchestrator:
             rating_results=rating_results,
             summaries=summaries
         )
+        # One 12-month target everywhere: the forecast refines the rating's
+        # fundamental target with catalysts and macro, so the rating shows that
+        long_term = prediction_results.get("predictions", {}).get("long_term", {})
+        if long_term.get("target_price"):
+            rating_results["price_target"] = long_term["target_price"]
+            rating_results["upside_percent"] = long_term["expected_change_pct"]
         return _plain({"sentiment": sentiment_results, "rating": rating_results,
                        "prediction": prediction_results})
 
@@ -267,7 +295,7 @@ class Orchestrator:
         ctx.report = report_content
 
         # Price history for charts
-        price_df = self.price_client.get_price_data(ticker, period="1y")
+        price_df = self.price_client.get_price_data(ticker, period="2y")
         price_history = []
         if price_df is not None and not price_df.empty:
             for idx, row in price_df.iterrows():
@@ -335,7 +363,8 @@ class Orchestrator:
 
     def _run_brief(self, graph_input: Any, thread_id: str) -> Dict[str, Any]:
         usage_before = dict(self.llm.usage)
-        config = {"configurable": {"thread_id": thread_id}}
+        # run_name/tags label the run in LangSmith when tracing is on
+        config = {"configurable": {"thread_id": thread_id}, "run_name": thread_id, "tags": ["brief"]}
         logger.info(f"Running brief graph, thread {thread_id}")
         out = self.brief_graph.invoke(graph_input, config)
         # Accumulate per thread, so a resumed run reports the whole brief's usage
@@ -352,7 +381,7 @@ class Orchestrator:
 
     def chat(self, ticker: str, question: str, thread_id: str) -> Dict[str, Any]:
         """Answer a follow-up question; history persists per thread_id."""
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": thread_id}, "run_name": f"chat-{ticker}", "tags": ["chat"]}
         out = self.chat_graph.invoke(
             {"ticker": ticker, "messages": [{"role": "user", "content": question}]}, config
         )

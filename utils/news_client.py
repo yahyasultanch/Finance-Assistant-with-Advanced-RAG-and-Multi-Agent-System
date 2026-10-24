@@ -1,4 +1,5 @@
 """News client for fetching financial headlines."""
+import re
 import requests
 import feedparser
 from typing import List, Dict, Any, Optional
@@ -6,6 +7,34 @@ from datetime import datetime, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def hacker_news_stories(query: str, days_back: int = 30, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Recent Hacker News stories matching a query (Algolia HN API, no key needed),
+    most relevant first. A tech-community channel, so treat it as social, not news.
+    """
+    since = int((datetime.now() - timedelta(days=days_back)).timestamp())
+    try:
+        response = requests.get(
+            "https://hn.algolia.com/api/v1/search",
+            params={"query": query, "tags": "story", "hitsPerPage": limit,
+                    "numericFilters": f"created_at_i>{since}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        hits = response.json().get("hits", [])
+    except Exception as e:
+        logger.warning(f"Hacker News search failed for {query!r}: {e}")
+        return []
+    return [{
+        "title": h.get("title") or "",
+        "date": (h.get("created_at") or "")[:10],
+        "source": "Hacker News",
+        "url": f"https://news.ycombinator.com/item?id={h['objectID']}",
+        "summary": f"{h.get('points') or 0} points, {h.get('num_comments') or 0} comments. "
+                   f"Links to {h.get('url') or 'a text post'}.",
+    } for h in hits if h.get("title")]
 
 
 class NewsClient:
@@ -129,19 +158,25 @@ class NewsClient:
             
             stock = yf.Ticker(ticker)
             # Ticker.news can come back empty when Yahoo changes its feed;
-            # the search endpoint has stayed reliable
-            news = stock.news or yf.Search(ticker, news_count=max_items).news
+            # the search endpoint has stayed reliable, but it also returns
+            # market roundups that merely list the ticker, so filter those
+            news = stock.news or yf.Search(ticker, news_count=max_items * 2).news
+            name = (stock.info.get("shortName") or ticker).replace(",", " ").split()[0]
 
             headlines = []
-            for item in news[:max_items]:
+            for item in news:
                 parsed = self._parse_yahoo_item(item)
-                if parsed["title"]:
+                if parsed["title"] and self._is_about(f"{parsed['title']} {parsed['summary']}", ticker, name):
                     headlines.append(parsed)
-
-            return headlines
+            return headlines[:max_items]
         except Exception as e:
             logger.error(f"Error fetching Yahoo Finance news for {ticker}: {e}")
             return []
+
+    @staticmethod
+    def _is_about(text: str, ticker: str, name: str) -> bool:
+        """The story names the company or ticker (Yahoo's relatedTickers tags are too loose)."""
+        return re.search(rf"\b({re.escape(ticker)}|{re.escape(name)})\b", text, re.IGNORECASE) is not None
 
     @staticmethod
     def _parse_yahoo_item(item: Dict[str, Any]) -> Dict[str, str]:

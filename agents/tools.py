@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from agents.citations import make_source, render_sources
 from agents.llm import Tool, ToolOutput
+from utils.news_client import hacker_news_stories
 from utils.xbrl import format_value
 
 FormType = Literal["10-K", "10-Q", "8-K", "NEWS"]
@@ -136,7 +137,8 @@ def build_tools(ctx: ResearchContext, sec_client) -> Dict[str, Tool]:
         return ToolOutput(render_sources(sources), sources)
 
     def get_news(args: LimitArgs) -> ToolOutput:
-        news = [n for n in ctx.news_items if n.get("source") != "SEC 8-K"][:args.limit]
+        news = [n for n in ctx.news_items
+                if n.get("source") != "SEC 8-K" and not n["source"].startswith("Reddit")][:args.limit]
         sources = [make_source(
             kind="news", label=f"NEWS#{n['source']}", title=n["title"], url=n["url"],
             date=n["date"], text=f"{n['title']}. {n['summary']}",
@@ -144,12 +146,28 @@ def build_tools(ctx: ResearchContext, sec_client) -> Dict[str, Tool]:
         ) for n in news]
         return ToolOutput(render_sources(sources), sources)
 
+    def get_discussions(args: LimitArgs) -> ToolOutput:
+        # Optional channels: Reddit (only if REDDIT_* keys were set at ingestion)
+        # and Hacker News (keyless, searched live by company name)
+        reddit = [n for n in ctx.news_items if n["source"].startswith("Reddit")][:args.limit]
+        name = (ctx.company_info.get("name") or ctx.ticker).replace(",", " ").split()[0]
+        posts = reddit + hacker_news_stories(name, limit=args.limit)
+        if not posts:
+            return ToolOutput(f"No community discussions found for {name} (Reddit needs "
+                              "REDDIT_CLIENT_ID/SECRET; Hacker News had no recent stories).")
+        sources = [make_source(
+            kind="social", label=f"SOCIAL#{p['source']}", title=p["title"], url=p["url"],
+            date=p["date"], text=f"{p['title']}. {p['summary']}", tier="social",
+        ) for p in posts]
+        return ToolOutput("Community discussion: opinion and attention, not facts.\n"
+                          + render_sources(sources), sources)
+
     def get_price_summary(args: NoArgs) -> ToolOutput:
         p, c = ctx.price_metrics, ctx.company_info
         text = (
             f"{c.get('name', ctx.ticker)} ({c.get('sector', 'N/A')} / {c.get('industry', 'N/A')}). "
-            f"Price {p.get('current_price', 0):.2f}; YTD return {p.get('ytd_return', 0):.1f}%; "
-            f"52-week range {p.get('low_52w', 0):.2f}-{p.get('high_52w', 0):.2f}; "
+            f"Price {p.get('current_price', 0):.2f}; 1-year return {p.get('ytd_return', 0):.1f}%; "
+            f"52-week range {p.get('52_week_low', 0):.2f}-{p.get('52_week_high', 0):.2f}; "
             f"annualized volatility {p.get('volatility', 0):.1f}%; "
             f"trailing P/E {c.get('pe_ratio') or 'N/A'}; beta {c.get('beta') or 'N/A'}; "
             f"market cap {c.get('market_cap', 0):,.0f}."
@@ -175,8 +193,12 @@ def build_tools(ctx: ResearchContext, sec_client) -> Dict[str, Tool]:
              "Recent 8-K material events (earnings releases, agreements, executive changes).",
              LimitArgs, get_recent_events),
         Tool("get_news", "Recent news headlines and summaries from publishers.", LimitArgs, get_news),
+        Tool("get_discussions",
+             "Community discussion (Hacker News, plus Reddit when configured): what "
+             "people are talking about. Signals attention and sentiment, not facts.",
+             LimitArgs, get_discussions),
         Tool("get_price_summary",
-             "Current price, YTD return, 52-week range, volatility, P/E, beta, market cap.",
+             "Current price, 1-year return, 52-week range, volatility, P/E, beta, market cap.",
              NoArgs, get_price_summary),
     ]
     return {tool.name: tool for tool in tools}
@@ -193,7 +215,8 @@ ROLES = {
         ["get_financial_metrics", "get_price_summary", "search_filings"],
     ),
     "news": (
-        "Recent news narrative and material events, including 8-K press releases.",
-        ["get_news", "get_recent_events", "search_filings"],
+        "Recent news narrative and material events, including 8-K press releases, "
+        "plus community discussion.",
+        ["get_news", "get_recent_events", "get_discussions", "search_filings"],
     ),
 }

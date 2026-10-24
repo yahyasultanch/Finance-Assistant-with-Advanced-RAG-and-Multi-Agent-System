@@ -149,7 +149,7 @@ def test_memory_carries_over_between_runs():
     first = graph.invoke({"ticker": "NVDA"}, {"configurable": {"thread_id": "m1"}})
     assert first["memory"] == {}
     assert [b["rating"] for b in mem.recent_briefs(store, "NVDA")] == ["HOLD"]
-    assert sorted(e["kind"] for e in mem.ledger(store, "NVDA")) == ["12m", "7d", "rating_target"]
+    assert sorted(e["kind"] for e in mem.ledger(store, "NVDA")) == ["12m", "7d"]
 
     second = graph.invoke({"ticker": "NVDA"}, {"configurable": {"thread_id": "m2"}})
     memory_id = second["memory"]["id"]

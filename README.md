@@ -20,21 +20,60 @@ This system revolutionizes the investment research process by:
 
 ## Key Features
 
-### Advanced RAG Pipeline
-- **Intelligent Document Chunking**: Section-aware chunking (800-1200 tokens with 100-token overlap)
-- **Hybrid Retrieval**: Combines BM25 keyword search with Azure OpenAI semantic embeddings (text-embedding-ada-002)
-- **FAISS Vector Store**: High-performance similarity search with persistent indexing
-- **Citation Tracking**: Every claim backed by verifiable source references (e.g., `[1:10-K#Business]`)
-- **Grounding Quality**: ≥90% citation coverage for hallucination prevention
+### Agent Orchestration (LangGraph)
+- **Planner**: Splits the brief into 3-6 research tasks and assigns each to a specialist researcher, based on what is actually indexed
+- **Parallel researchers**: Fanned out with LangGraph `Send`; each runs its own tool-calling loop (filings, financials or news toolset)
+- **Analyst**: Synthesizes the research notes into structured claims (Pydantic-validated JSON), each citing source ids
+- **Verifier**: Checks every claim; if under 80% verify, the graph loops back to the planner with targeted tasks for the failed claims
+- **Human-in-the-loop**: Optional `interrupt()` pauses the graph for approve/reject before publishing; state persists in a SQLite checkpointer, so the run resumes exactly where it stopped
+- **Follow-up chat**: A second graph answers questions with the same tools; conversation memory is the checkpointer thread
 
-### Multi-Agent Architecture
-- **IngestionAgent**: Fetches SEC filings, parses sections, builds vector indexes
-- **SummarizerAgent**: RAG-powered summaries using **Azure OpenAI GPT-4o-mini**
-- **SentimentAgent**: FinBERT zero-shot sentiment analysis with bootstrap confidence intervals
-- **RatingEngine**: Multi-factor investment scoring system
-- **PredictiveEngine**: AI-powered price forecasting with catalyst detection
-- **ReporterAgent**: Assembles professional analyst briefs with all components
-- **Orchestrator**: Coordinates the entire workflow with caching and error handling
+### Agent Memory
+- **Short-term**: the SQLite checkpointer holds each brief run (resumable after review) and each chat thread
+- **Long-term**: a LangGraph `Store` (SQLite), injected into nodes, keeps every published brief per ticker. The planner loads earlier briefs and registers them as a citable source; the analyst writes a verified "Changes Since Last Brief" section; the chat agent sees the ticker's history
+- **Prediction ledger**: every 7-day, 12-month and rating price-target call is logged with the price when it was made, then scored against actual closes once due (direction hit rate, mean absolute error). The score feeds back into the next report and the Track Record tab
+- **Agent trace**: Every tool call (args, latency, sources returned, errors) and token usage is recorded and shown in the UI
+
+### Tool Calling
+- Tools are typed: Pydantic argument models become OpenAI function schemas
+- The tool loop is hand-written (`agents/llm.py`) to keep the protocol visible: parallel `tool_calls` run concurrently, tool errors go back to the model as observations, and a step budget forces a final answer
+- Tools: `search_filings` (hybrid search with form/section filters), `get_financial_metrics` (SEC XBRL), `get_recent_events` (8-K items), `get_news`, `get_price_summary`
+- Empty results say what *is* indexed, so the agent can retry with filters that exist
+
+### Advanced RAG Pipeline
+- **Section-aware chunking**: 10-K/10-Q sections found from their real headers (skipping table-of-contents entries and cross-references); ~1000-character chunks with 100-character overlap
+- **8-K exhibits**: EX-99.x press releases and CFO commentary are indexed, not just the 8-K cover page
+- **Contextual chunk headers**: each chunk is embedded and BM25-indexed with a header like `NVDA 10-K (filed 2026-02-25) · Risk Factors`, so queries can match company, form, period and section
+- **Hybrid retrieval**: BM25 + Azure OpenAI embeddings fused with weighted Reciprocal Rank Fusion, with metadata filters (form type, section)
+- **Optional cross-encoder reranker** (`RERANKER_MODEL`): rescores the fused candidates locally. Off by default, because the evaluation below showed it doesn't help on this corpus
+- **FAISS vector store**: Versioned, persisted indexes, rebuilt automatically when older than 7 days
+
+### Evaluation
+`python eval/run_eval.py NVDA AAPL [--briefs]` runs a retrieval ablation over 12 generic analyst questions with silver relevance labels (expected form/section + keyword pattern), and optionally full briefs. Latest run ([eval/results.md](eval/results.md)), 24 question-ticker pairs:
+
+| Setup | hit@5 | MRR@10 | P@5 |
+|-------|-------|--------|-----|
+| BM25 only | 0.88 | 0.78 | 0.62 |
+| Semantic only | 0.96 | 0.93 | 0.85 |
+| Hybrid (RRF) | 0.96 | 0.91 | 0.83 |
+| **Hybrid + contextual headers** (default) | 0.96 | **0.94** | **0.89** |
+| + reranker, ms-marco-MiniLM-L-6-v2 | 0.96 | 0.90 | 0.82 |
+| + reranker, bge-reranker-base | 0.96 | 0.89 | 0.87 |
+
+Takeaways: contextual headers give the best ranking (+0.06 P@5 over plain hybrid); neither general-purpose reranker beats them on SEC text, so reranking stays opt-in. Hybrid trails semantic-only slightly here because BM25 is weak on these natural-language questions. The question set is small and hit@5 is near ceiling, so treat differences under ~0.03 as noise.
+
+End-to-end briefs (same run): NVDA and AAPL each drafted 17 claims with 88% verified on the first pass, using 17-18 LLM calls and ~28-34k tokens (under a cent each on gpt-4o-mini).
+
+### Sources and Citations
+- **Source registry**: Every tool result becomes sources with content-hash ids (`[S3f9a2c]`), so parallel agents never collide
+- **Claim verification**: Each claim must (1) cite ids that exist, (2) contain only figures that appear in its sources (unit-aware: "$46.7 billion" matches "46,743,000,000"), and (3) pass an LLM-judge support check
+- **Measured coverage**: The report states how many claims verified and lists the removed ones with reasons
+- **Deep links and trust tiers**: Filing citations link to the quoted passage (`#:~:text=`); sources are tiered SEC > market data > news > social
+
+### Scoring Models
+- **SentimentAgent**: FinBERT sentiment with bootstrap confidence intervals
+- **RatingEngine**: Multi-factor heuristic scoring
+- **PredictiveEngine**: Heuristic price scenarios with keyword catalyst detection
 
 ### Investment Rating System
 - **Multi-Factor Scoring**: 
@@ -116,6 +155,34 @@ This system revolutionizes the investment research process by:
 
 ## System Architecture
 
+### Brief graph
+
+```mermaid
+flowchart LR
+    ingest --> planner
+    planner -- "Send (fan-out)" --> R1[researcher: filings]
+    planner -- "Send (fan-out)" --> R2[researcher: financials]
+    planner -- "Send (fan-out)" --> R3[researcher: news]
+    R1 & R2 & R3 --> analyst --> verifier
+    verifier -- "coverage < 80%, 1 revision max" --> planner
+    verifier -- "coverage OK" --> score --> review{{"review (interrupt)"}}
+    review -- approved --> report
+    review -- rejected --> END((end))
+```
+
+| Node | Does |
+|------|------|
+| `ingest` | Loads or builds the ticker's index; fetches news, prices and XBRL facts |
+| `planner` | Loads earlier briefs from memory; LLM plan of research tasks per researcher role (re-plans from verifier feedback) |
+| `researcher` | Tool-calling loop for one task; returns notes citing source ids |
+| `analyst` | Structured claims per report section, citing source ids |
+| `verifier` | Citation, figure and LLM-judge checks; computes coverage; routes |
+| `score` | FinBERT sentiment, rating, predictions (no LLM) |
+| `review` | Optional human approval via `interrupt()` |
+| `report` | Scores the prediction ledger, assembles and saves the brief, writes it to memory and logs its price calls |
+
+### Layers (original diagram)
+
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                   Streamlit Web UI + Plotly Charts                   │
@@ -149,14 +216,12 @@ This system revolutionizes the investment research process by:
 
 ### Data Flow
 1. **Input**: User enters ticker (e.g., NVDA) → Streamlit UI
-2. **Ingestion**: SEC Client fetches 10-K/10-Q/8-K → Parse sections → Chunk → Embed (Azure) → FAISS index
-3. **Analysis**: 
-   - SummarizerAgent: Hybrid retrieval → Azure GPT-4o-mini → Generated summaries with citations
-   - SentimentAgent: News aggregation → FinBERT → Sentiment scores + confidence
-   - RatingEngine: Fundamentals + Sentiment + Technical + Risk → BUY/HOLD/SELL rating
-   - PredictiveEngine: Momentum + Catalysts + Volatility → 7D & 12M price predictions
-4. **Visualization**: FinancialCharts class → Plotly charts → Historical + Predicted data
-5. **Output**: ReporterAgent assembles → Markdown/PDF report → Display in UI
+2. **Ingestion**: SEC Client fetches 10-K/10-Q/8-K (+ EX-99 exhibits) → Parse sections → Chunk → Embed (Azure) → FAISS index; XBRL company facts → key metrics
+3. **Research**: Planner → parallel researchers call tools (hybrid search, XBRL metrics, events, news, prices) → notes citing source ids
+4. **Synthesis and verification**: Analyst drafts claims → verifier checks every claim → re-plan if coverage is low
+5. **Scoring**: FinBERT sentiment, multi-factor rating, predictions
+6. **Output**: Optional human review → ReporterAgent assembles the brief with verified claims, verification summary and tiered sources → UI tabs (Report, Charts, Metrics, Sentiment, Sources, Agent Trace, Ask, Track Record)
+7. **Memory**: The brief is saved to long-term memory and its price calls to the prediction ledger
 
 ## Installation
 
@@ -260,18 +325,24 @@ FinanceAnalyst/
 ├── app/
 │   └── ui_app.py                    # Streamlit web interface with tabs and charts
 ├── agents/
+│   ├── graph.py                     # LangGraph brief + chat graphs (nodes, routing, state)
+│   ├── llm.py                       # Azure OpenAI client, structured output, tool-calling loop
+│   ├── tools.py                     # Typed research tools and researcher roles
+│   ├── citations.py                 # Source registry and claim verification
+│   ├── orchestrator.py              # Owns models/data/tools, runs the graphs, checkpointer
 │   ├── ingestion_agent.py           # SEC filing download and indexing
-│   ├── summarizer_agent.py          # RAG-powered summaries with Azure OpenAI
 │   ├── sentiment_agent.py           # FinBERT sentiment analysis
-│   ├── reporter_agent.py            # Report assembly and export
-│   └── orchestrator.py              # Workflow coordination and caching
+│   ├── memory.py                    # Long-term memory and prediction ledger (LangGraph Store)
+│   └── reporter_agent.py            # Report assembly and export
 ├── rag/
 │   ├── chunking.py                  # Section-aware document chunking
 │   ├── embed.py                     # Azure OpenAI embedding model wrapper
 │   ├── vector_store.py              # FAISS vector index management
-│   └── retriever.py                 # Hybrid BM25 + semantic retrieval
+│   ├── retriever.py                 # Hybrid BM25 + semantic retrieval, RRF, filters
+│   └── reranker.py                  # Optional cross-encoder reranker
 ├── utils/
-│   ├── sec_client.py                # SEC EDGAR API client (10-K, 10-Q, 8-K)
+│   ├── sec_client.py                # SEC EDGAR API client (10-K, 10-Q, 8-K, exhibits, XBRL)
+│   ├── xbrl.py                      # Key financial metrics from XBRL company facts
 │   ├── news_client.py               # News aggregation (Yahoo, RSS, 8-K events)
 │   ├── prices.py                    # yfinance wrapper for price data
 │   ├── predictive_model.py          # Predictive model for forecsating
@@ -285,9 +356,13 @@ FinanceAnalyst/
 │   └── NVDA/
 │       └── ...
 ├── index/                            # FAISS vector indexes (gitignored)
-│   ├── AAPL_index.faiss
-│   ├── AAPL_metadata.pkl
+│   ├── aapl_v2.faiss
+│   ├── aapl_v2.pkl
 │   └── ...
+├── tests/                            # pytest: retrieval, sections, citations, memory, graph flow (no API calls)
+├── eval/
+│   ├── run_eval.py                   # Retrieval ablation + end-to-end brief evaluation
+│   └── results.md                    # Latest results
 ├── reports/                          # Generated analyst briefs (gitignored)
 │   ├── AAPL_analyst_brief_2024-10-07.md
 │   ├── AAPL_analyst_brief_2024-10-07.pdf
@@ -304,13 +379,24 @@ FinanceAnalyst/
 
 ### Key Files Explained
 
-- **`app/ui_app.py`**: Streamlit web interface with 5 tabs (Report, Charts, Metrics, Sentiment, Sources), chart controls, and PDF export
-- **`agents/orchestrator.py`**: Central coordinator that manages all agents, handles caching, and orchestrates the full workflow
-- **`rag/retriever.py`**: Implements hybrid retrieval combining BM25 (keyword) and semantic search (Azure embeddings) for best results
-- **`utils/parse_8k.py`**: Parses 25 standard 8-K item types, extracts material events, and formats them as "news" items
-- **`utils/visualizations.py`**: Creates interactive Plotly charts with historical prices, AI predictions (7D & 12M), risk bands, and volume
-- **`agents/rating_engine.py`**: Calculates investment ratings using 4 factors (35% fundamentals + 25% sentiment + 20% technical + 20% risk)
-- **`agents/predictive_engine.py`**: Generates short-term (7D) and long-term (12M) price predictions with confidence scoring
+- **`app/ui_app.py`**: Streamlit interface with 8 tabs (Report, Charts, Metrics, Sentiment, Sources, Agent Trace, Ask, Track Record) and the human review panel
+- **`agents/memory.py`**: Long-term memory of briefs and the prediction ledger (record, score, summarize)
+- **`agents/graph.py`**: The LangGraph graphs: planner, parallel researchers, analyst, verifier loop, scoring, review, report; plus the chat graph
+- **`agents/llm.py`**: Hand-written tool-calling loop and Pydantic-validated JSON output
+- **`agents/citations.py`**: Content-hash source ids, figure matching, deep links
+- **`rag/retriever.py`**: Hybrid BM25 + semantic retrieval with Reciprocal Rank Fusion and metadata filters
+- **`utils/sec_client.py`**: EDGAR client, including 8-K item parsing (25 item types), exhibit download and XBRL facts
+- **`utils/visualizations.py`**: Interactive Plotly charts with historical prices, predictions, risk bands and volume
+- **`utils/rating_engine.py`**: Investment rating from 4 factors (35% fundamentals + 25% sentiment + 20% technical + 20% risk)
+- **`utils/predictive_model.py`**: Short-term (7D) and long-term (12M) heuristic price scenarios
+
+### Tests
+
+```bash
+python -m pytest -q
+```
+
+The graph tests drive the full LangGraph flow (fan-out, verifier revision loop, interrupt and resume, memory carried between runs) with a stub LLM, so they need no API keys.
 
 
 ### Models

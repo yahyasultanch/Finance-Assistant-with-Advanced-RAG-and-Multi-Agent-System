@@ -1,9 +1,37 @@
 """Text chunking utilities for RAG."""
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import re
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def contextual_header(metadata: Dict[str, Any]) -> str:
+    """
+    One-line context for a chunk: "NVDA 10-K (filed 2026-02-25) · Risk Factors".
+
+    A chunk like "Competition could adversely impact our market share" says
+    nothing about which company, filing or period it is from. Prepending this
+    header before embedding and BM25 indexing lets queries match on that
+    context (Anthropic's "contextual retrieval", with a metadata header
+    instead of an LLM-written one).
+    """
+    # ponytail: metadata header only; an LLM-written per-chunk summary
+    # (one call per chunk) would add more context if retrieval needs it
+    ticker = metadata.get("ticker", "")
+    form = metadata.get("form_type", "")
+    date = metadata.get("filing_date", "")
+    if form == "NEWS":
+        return f"{ticker} news ({date}) · {metadata.get('source', '')}"
+    section = metadata.get("section", "")
+    section = "" if section in ("", "Document") else f" · {section}"
+    return f"{ticker} {form} (filed {date}){section}"
+
+
+def indexed_text(doc: Dict[str, Any]) -> str:
+    """Text used for embedding, BM25 and reranking: header plus chunk."""
+    context = doc.get("context", "")
+    return f"{context}\n{doc['text']}" if context else doc["text"]
 
 
 class DocumentChunker:
@@ -131,6 +159,20 @@ class DocumentChunker:
         sentences = sentence_endings.split(text)
         return [s.strip() for s in sentences if s.strip()]
 
+    # Section name -> (header regex, regexes of headers that end the section)
+    TEN_K_SECTIONS = {
+        "Business": (r"Item\s+1\.\s*Business", [r"Item\s+1[AB]", r"Item\s+2"]),
+        "Risk Factors": (r"Item\s+1A\.\s*Risk Factors", [r"Item\s+1B", r"Item\s+2"]),
+        "MD&A": (r"Item\s+7\.\s*Management.?s Discussion", [r"Item\s+7A", r"Item\s+8"]),
+        "Financial Statements": (r"Item\s+8\.\s*Financial Statements", [r"Item\s+9"]),
+    }
+
+    TEN_Q_SECTIONS = {
+        "Financial Statements": (r"Item\s+1\.\s*Financial Statements", [r"Item\s+2"]),
+        "MD&A": (r"Item\s+2\.\s*Management.?s Discussion", [r"Item\s+3"]),
+        "Risk Factors": (r"Item\s+1A\.\s*Risk Factors", [r"Item\s+2"]),
+    }
+
     def extract_sections_from_10k(self, filing_text: str) -> Dict[str, str]:
         """
         Extract standard sections from 10-K filing.
@@ -141,25 +183,7 @@ class DocumentChunker:
         Returns:
             Dict of section_name -> section_text
         """
-        sections = {}
-        
-        # Common 10-K sections
-        section_patterns = {
-            "Business": r"(?:ITEM\s+1\.|Item\s+1\.)(?:\s*Business)(.*?)(?=ITEM\s+1[AB]|Item\s+1[AB]|ITEM\s+2|Item\s+2|\Z)",
-            "Risk Factors": r"(?:ITEM\s+1A\.|Item\s+1A\.)(?:\s*Risk Factors)(.*?)(?=ITEM\s+1B|Item\s+1B|ITEM\s+2|Item\s+2|\Z)",
-            "MD&A": r"(?:ITEM\s+7\.|Item\s+7\.)(?:\s*Management'?s Discussion)(.*?)(?=ITEM\s+7A|Item\s+7A|ITEM\s+8|Item\s+8|\Z)",
-            "Financial Statements": r"(?:ITEM\s+8\.|Item\s+8\.)(?:\s*Financial Statements)(.*?)(?=ITEM\s+9|Item\s+9|\Z)",
-        }
-        
-        for section_name, pattern in section_patterns.items():
-            match = re.search(pattern, filing_text, re.DOTALL | re.IGNORECASE)
-            if match:
-                section_text = match.group(1).strip()
-                if len(section_text) > 100:  # Only include substantial sections
-                    sections[section_name] = section_text
-                    logger.info(f"Extracted section: {section_name} ({len(section_text)} chars)")
-        
-        return sections
+        return self._extract_sections(filing_text, self.TEN_K_SECTIONS)
 
     def extract_sections_from_10q(self, filing_text: str) -> Dict[str, str]:
         """
@@ -171,20 +195,47 @@ class DocumentChunker:
         Returns:
             Dict of section_name -> section_text
         """
+        return self._extract_sections(filing_text, self.TEN_Q_SECTIONS)
+
+    def _extract_sections(
+        self,
+        filing_text: str,
+        specs: Dict[str, Tuple[str, List[str]]]
+    ) -> Dict[str, str]:
+        """Extract each (header, end headers) spec, keeping substantial sections."""
         sections = {}
-        
-        section_patterns = {
-            "Financial Statements": r"(?:ITEM\s+1\.|Item\s+1\.)(?:\s*Financial Statements)(.*?)(?=ITEM\s+2|Item\s+2|\Z)",
-            "MD&A": r"(?:ITEM\s+2\.|Item\s+2\.)(?:\s*Management'?s Discussion)(.*?)(?=ITEM\s+3|Item\s+3|\Z)",
-            "Risk Factors": r"(?:ITEM\s+1A\.|Item\s+1A\.)(?:\s*Risk Factors)(.*?)(?=ITEM\s+2|Item\s+2|\Z)",
-        }
-        
-        for section_name, pattern in section_patterns.items():
-            match = re.search(pattern, filing_text, re.DOTALL | re.IGNORECASE)
-            if match:
-                section_text = match.group(1).strip()
-                if len(section_text) > 100:
-                    sections[section_name] = section_text
-                    logger.info(f"Extracted section: {section_name} ({len(section_text)} chars)")
-        
+        for section_name, (header, ends) in specs.items():
+            section_text = self._longest_match(header, ends, filing_text)
+            if len(section_text) > 100:  # Only include substantial sections
+                sections[section_name] = section_text
+                logger.info(f"Extracted section: {section_name} ({len(section_text)} chars)")
         return sections
+
+    @staticmethod
+    def _longest_match(header: str, ends: List[str], text: str) -> str:
+        """
+        Return the longest span from a section header to the next end header.
+        
+        Filings repeat each "Item X." header in the table of contents and in
+        cross-references ("Refer to Item 1A. Risk Factors..."). Real headers
+        start a line, so first try line-anchored headers, ending at the next
+        line-anchored "Item N" of any kind; TOC entries then end almost
+        immediately and the longest match is the real section. Falls back to
+        matching anywhere, with the given end headers, for filings whose text
+        layout puts headers mid-line.
+        """
+        line_start = r"^[^\S\n]*"
+        passes = [
+            (line_start + header, line_start + r"Item\s+\d+[A-Z]?\b"),
+            (header, "|".join(ends)),
+        ]
+        for start, end in passes:
+            pattern = rf"{start}(.*?)(?={end}|\Z)"
+            matches = [
+                m.group(1).strip()
+                for m in re.finditer(pattern, text, re.DOTALL | re.IGNORECASE | re.MULTILINE)
+            ]
+            best = max(matches, key=len, default="")
+            if len(best) > 100:
+                return best
+        return ""

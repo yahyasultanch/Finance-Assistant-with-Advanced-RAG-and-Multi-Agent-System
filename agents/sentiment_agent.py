@@ -3,7 +3,6 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipe
 import torch
 import numpy as np
 from typing import List, Dict, Any, Tuple
-from scipy import stats
 import logging
 
 logger = logging.getLogger(__name__)

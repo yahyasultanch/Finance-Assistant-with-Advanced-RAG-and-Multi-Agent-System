@@ -1,6 +1,8 @@
 """Streamlit UI for AI Finance Assistant."""
 import streamlit as st
+import json
 import sys
+import uuid
 from pathlib import Path
 import logging
 
@@ -14,7 +16,7 @@ from config import (
     DATA_DIR, INDEX_DIR, REPORTS_DIR,
     SEC_USER_AGENT, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY,
     AZURE_OPENAI_DEPLOYMENT, AZURE_EMBEDDING_DEPLOYMENT, AZURE_EMBEDDING_KEY,
-    AZURE_OPENAI_API_VERSION, FINBERT_MODEL,
+    AZURE_OPENAI_API_VERSION, FINBERT_MODEL, RERANKER_MODEL,
     CHUNK_SIZE, CHUNK_OVERLAP, TOP_K_RETRIEVAL
 )
 from agents.orchestrator import Orchestrator
@@ -50,9 +52,127 @@ def get_orchestrator():
         azure_embedding_key=AZURE_EMBEDDING_KEY,
         api_version=AZURE_OPENAI_API_VERSION,
         finbert_model=FINBERT_MODEL,
+        reranker_model=RERANKER_MODEL,
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
         top_k=TOP_K_RETRIEVAL
+    )
+
+
+def render_review(review):
+    """Human-in-the-loop panel. Returns (approved, note) once a button is pressed, else None."""
+    st.subheader("🧑‍⚖️ Review the draft before publishing")
+    target = review.get("price_target")
+    target = f"${target:.2f}" if isinstance(target, (int, float)) else "N/A"
+    st.markdown(
+        f"**Draft rating:** {review['rating']} (score {review['score']:.1f}, 12M target {target}) · "
+        f"**Citation coverage:** {review['coverage']:.0%}"
+    )
+    st.dataframe(review["claims"], use_container_width=True, hide_index=True)
+    note = st.text_area("Reviewer note (added to the report)", key="review_note")
+    col1, col2 = st.columns(2)
+    if col1.button("✅ Approve and publish", type="primary", use_container_width=True):
+        return True, note
+    if col2.button("❌ Reject", use_container_width=True):
+        return False, note
+    return None
+
+
+def render_trace(result):
+    """What the agents did: plan, verification, tool calls, token usage."""
+    st.markdown(
+        "**Graph:** ingest → planner → researchers *(parallel, tool-calling)* → analyst → "
+        "verifier ⟲ *(replans if coverage < 80%)* → score → review → report"
+    )
+    verification = result.get("verification", {})
+    usage = result.get("usage", {})
+    if verification:
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Claims verified", f"{verification['verified']}/{verification['total']}")
+        col2.metric("Citation coverage", f"{verification['coverage']:.0%}",
+                    f"{verification['coverage'] - verification['first_pass_coverage']:+.0%} vs first draft")
+        col3.metric("Revision rounds", verification.get("revisions", 0))
+        tokens = usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0)
+        col4.metric("LLM calls / tokens", f"{usage.get('calls', 0)} / {tokens / 1000:.1f}k")
+
+    st.subheader("Research plan")
+    st.dataframe(result.get("plan", []), use_container_width=True, hide_index=True)
+
+    st.subheader("Claim verification")
+    st.dataframe(
+        [{"section": c["section"], "status": c["status"], "claim": c["text"],
+          "sources": ", ".join(c["sources"]), "reason": c.get("reason", "")}
+         for c in verification.get("claims", [])],
+        use_container_width=True, hide_index=True
+    )
+
+    st.subheader("Tool calls")
+    st.dataframe(
+        [{"node": e["node"], "tool": e.get("tool", ""), "args": json.dumps(e.get("args", "")),
+          "sources": str(e.get("sources", "")), "ms": str(e.get("ms", "")),
+          "error": e.get("error") or "", "detail": e.get("detail", "")}
+         for e in result.get("trace", [])],
+        use_container_width=True, hide_index=True
+    )
+
+
+def render_chat(ticker):
+    """Follow-up Q&A; history lives in the LangGraph checkpointer under this thread id."""
+    orchestrator = get_orchestrator()
+    thread_key = f"chat_thread_{ticker}"
+    if thread_key not in st.session_state:
+        st.session_state[thread_key] = f"chat-{ticker}-{uuid.uuid4().hex[:8]}"
+    thread_id = st.session_state[thread_key]
+
+    st.caption("Ask follow-up questions. The assistant calls the same research tools and "
+               "remembers this conversation.")
+    for message in orchestrator.chat_history(thread_id):
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if message.get("sources"):
+                st.caption(" · ".join(f"[{s['id']}: {s['label']}]({s['url']})" for s in message["sources"]))
+            if message.get("tool_calls"):
+                st.caption("Tools: " + ", ".join(c["tool"] for c in message["tool_calls"]))
+
+    question = st.chat_input(f"Ask about {ticker}...", key=f"chat_input_{ticker}")
+    if question:
+        with st.spinner("Researching..."):
+            orchestrator.chat(ticker, question, thread_id)
+        st.rerun()
+
+
+def render_track_record(ticker):
+    """Long-term memory: every published brief and how its price calls turned out."""
+    record = get_orchestrator().track_record(ticker)
+    summary = record["summary"]
+
+    st.caption("Every published brief is remembered, and its price calls are scored against "
+               "actual closes once their horizon passes.")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Calls logged", summary["total"], f"{summary['pending']} pending", delta_color="off")
+    col2.metric("Direction correct",
+                f"{summary['direction_hit_rate']:.0%}" if summary.get("scored") else "n/a")
+    col3.metric("Mean abs. error",
+                f"{summary['mean_abs_error_pct']:.1f}%" if summary.get("scored") else "n/a")
+
+    st.subheader("Prediction ledger")
+    names = {"7d": "7-day", "12m": "12-month", "rating_target": "Rating target"}
+    st.dataframe(
+        [{"made on": e["made_on"], "call": names.get(e["kind"], e["kind"]),
+          "price then": e["price"], "target": e["target"], "due": e["due"],
+          "status": e["status"], "actual / latest": e["actual"],
+          "error %": e["error_pct"], "direction correct": e["direction_hit"]}
+         for e in reversed(record["entries"])],
+        use_container_width=True, hide_index=True
+    )
+
+    st.subheader("Earlier briefs (memory)")
+    st.dataframe(
+        [{"date": b["date"], "rating": b["rating"], "score": b["score"],
+          "price target": b["price_target"], "price then": b["price"],
+          "citation coverage": f"{b['coverage']:.0%}"}
+         for b in record["briefs"]],
+        use_container_width=True, hide_index=True
     )
 
 
@@ -65,9 +185,10 @@ def main():
     Generate comprehensive analyst briefs using RAG, AI agents, and financial sentiment analysis.
     
     **Features:**
-    - 📑 SEC filing analysis (10-K, 10-Q, 8-K)
+    - 🧭 LangGraph agents: planner, parallel tool-calling researchers, analyst, verifier
+    - 📑 SEC filing analysis (10-K, 10-Q, 8-K press releases, XBRL financials)
     - 📰 News aggregation and sentiment
-    - 🤖 RAG-powered summaries with citations
+    - ✅ Every claim's citations verified before it reaches the report
     - 💹 Price and performance metrics
     - 📈 FinBERT sentiment analysis
     """)
@@ -104,7 +225,14 @@ def main():
             options=["markdown", "html"],
             help="Output format for the report"
         )
-        
+
+        review = st.checkbox(
+            "Review before publishing",
+            value=False,
+            help="Human-in-the-loop: the agent graph pauses after verification and scoring "
+                 "so you can approve or reject the draft before the report is written"
+        )
+
         st.divider()
         
         # Generate brief button
@@ -116,8 +244,10 @@ def main():
             st.session_state['use_cache'] = use_cache
             st.session_state['days_back'] = days_back
             st.session_state['save_format'] = save_format
+            st.session_state['review'] = review
             st.session_state['generate_clicked'] = True
             st.session_state['result'] = None  # Clear previous result
+            st.session_state['pending_review'] = None
         
     # Main content area - Check if we should display results
     if st.session_state.get('generate_clicked', False):
@@ -136,44 +266,38 @@ def main():
         if st.session_state.get('result') is None:
             try:
                 orchestrator = get_orchestrator()
-                
-                # Progress tracking
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                # Step 1: Ingestion
-                status_text.text("📥 Step 1/5: Ingesting SEC filings and news...")
-                progress_bar.progress(10)
-                
-                with st.spinner("Fetching data from SEC EDGAR and news sources..."):
-                    # This will be done inside orchestrator
-                    pass
-                
-                progress_bar.progress(30)
-                
-                # Step 2: Generate brief
-                status_text.text("🤖 Step 2/5: Generating RAG summaries...")
-                progress_bar.progress(40)
-                
-                with st.spinner("Running retrieval-augmented generation..."):
-                    result = orchestrator.generate_brief(
-                        ticker=ticker,
-                        use_cache=use_cache,
-                        days_back=days_back,
-                        save_format=save_format
-                    )
-                
-                # Store result in session state
-                st.session_state['result'] = result
-                
-                progress_bar.progress(80)
-                
-                # Step 3: Display results
-                status_text.text("📊 Step 3/5: Analyzing sentiment...")
-                progress_bar.progress(90)
-                
-                status_text.text("✅ Complete!")
-                progress_bar.progress(100)
+                pending = st.session_state.get('pending_review')
+
+                if pending is None:
+                    with st.spinner("Agents at work: ingesting filings, planning, researching in "
+                                    "parallel, drafting and verifying citations..."):
+                        outcome = orchestrator.generate_brief(
+                            ticker=ticker,
+                            use_cache=use_cache,
+                            days_back=days_back,
+                            save_format=save_format,
+                            review=st.session_state.get('review', False)
+                        )
+                    if outcome["status"] == "needs_review":
+                        st.session_state['pending_review'] = pending = outcome
+                    else:
+                        st.session_state['result'] = outcome
+
+                # Graph is paused at its review node; resume with the decision
+                if pending is not None:
+                    decision = render_review(pending["review"])
+                    if decision is None:
+                        return
+                    approved, note = decision
+                    with st.spinner("Resuming the agent graph..."):
+                        outcome = orchestrator.resume_brief(pending["thread_id"], approved, note)
+                    st.session_state['pending_review'] = None
+                    if outcome["status"] != "done":
+                        st.warning("Draft rejected: no report was written.")
+                        st.session_state['generate_clicked'] = False
+                        return
+                    st.session_state['result'] = outcome
+                    st.rerun()  # redraw without the review panel
             except Exception as e:
                 st.error(f"Error generating brief: {str(e)}")
                 logger.error(f"Error in brief generation: {e}", exc_info=True)
@@ -191,7 +315,10 @@ def main():
             st.header(f"📄 Analyst Brief - {ticker}")
             
             # Tabs for different views
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 Report", "📈 Charts", "📊 Metrics", "💬 Sentiment", "🔍 Sources"])
+            tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+                "📝 Report", "📈 Charts", "📊 Metrics", "💬 Sentiment", "🔍 Sources",
+                "🧭 Agent Trace", "🗨️ Ask", "📒 Track Record"
+            ])
             
             with tab1:
                 st.markdown(result["report_content"])
@@ -358,14 +485,26 @@ def main():
                             all_citations.append(citation)
                 
                 if all_citations:
+                    tiers = {1: "SEC", 2: "Market data", 3: "News", 4: "Social"}
                     for i, citation in enumerate(all_citations, 1):
+                        number = citation.get("number", i)
                         source = citation.get("source", "Unknown")
                         url = citation.get("url", "#")
                         date = citation.get("date", "N/A")
-                        st.markdown(f"{i}. [{source} - {date}]({url})")
+                        tier = tiers.get(citation.get("tier"), "")
+                        st.markdown(f"{number}. [{source} - {date}]({url})" + (f" · *{tier}*" if tier else ""))
                 else:
                     st.info("No sources available")
-    
+
+            with tab6:
+                render_trace(result)
+
+            with tab7:
+                render_chat(ticker)
+
+            with tab8:
+                render_track_record(ticker)
+
     else:
         # Show instructions when not generating
         st.info("""

@@ -2,6 +2,7 @@
 from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime, timedelta
 import logging
+import re
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
@@ -243,12 +244,10 @@ class PredictiveEngine:
         
         # Search in news items
         for item in news_items:
-            title = item.get("title", "").lower()
-            content = item.get("content", "").lower()
-            text = title + " " + content
+            text = self._news_text(item)
             
             for catalyst_type, keywords in catalyst_keywords.items():
-                if any(keyword in text for keyword in keywords):
+                if self._mentions(text, keywords):
                     # Estimate impact
                     impact = self._estimate_catalyst_impact(catalyst_type, text)
                     
@@ -268,7 +267,7 @@ class PredictiveEngine:
         combined_filing_text = (events_summary + " " + outlook_summary).lower()
         
         for catalyst_type, keywords in catalyst_keywords.items():
-            if any(keyword in combined_filing_text for keyword in keywords):
+            if self._mentions(combined_filing_text, keywords):
                 impact = self._estimate_catalyst_impact(catalyst_type, combined_filing_text)
                 
                 catalysts.append({
@@ -375,10 +374,10 @@ class PredictiveEngine:
         
         # Analyze news
         for item in news_items:
-            text = (item.get("title", "") + " " + item.get("content", "")).lower()
+            text = self._news_text(item)
             
             for factor_type, keywords in macro_keywords.items():
-                if any(keyword in text for keyword in keywords):
+                if self._mentions(text, keywords):
                     factor_counts[factor_type] += 1
                     
                     # Determine if mention is positive or negative
@@ -396,7 +395,7 @@ class PredictiveEngine:
         combined_text = risk_summary + " " + outlook_summary
         
         for factor_type, keywords in macro_keywords.items():
-            if any(keyword in combined_text for keyword in keywords):
+            if self._mentions(combined_text, keywords):
                 factor_counts[factor_type] += 2  # Weight SEC filings higher
                 factor_sentiment[factor_type].append(-0.5)  # Assume cautious
         
@@ -638,15 +637,31 @@ class PredictiveEngine:
     
     def _is_positive_sentiment(self, item: Dict[str, str]) -> bool:
         """Simple heuristic for positive sentiment."""
-        text = (item.get("title", "") + " " + item.get("content", "")).lower()
         positive_words = ["surge", "soar", "beat", "growth", "profit", "up", "gain", "positive", "strong"]
-        return any(word in text for word in positive_words)
+        return self._mentions(self._news_text(item), positive_words)
     
     def _is_negative_sentiment(self, item: Dict[str, str]) -> bool:
         """Simple heuristic for negative sentiment."""
-        text = (item.get("title", "") + " " + item.get("content", "")).lower()
         negative_words = ["fall", "drop", "miss", "loss", "down", "decline", "negative", "weak", "concern"]
-        return any(word in text for word in negative_words)
+        return self._mentions(self._news_text(item), negative_words)
+
+    @staticmethod
+    def _news_text(item: Dict[str, str]) -> str:
+        """Lowercased title + summary of a news item."""
+        return f"{item.get('title', '')} {item.get('summary', '')}".lower()
+
+    @staticmethod
+    def _mentions(text: str, keywords: List[str]) -> bool:
+        """
+        Case-insensitive whole-word keyword match, allowing simple suffixes
+        (s/es/d/ed/ing) so "acquired" matches "acquire" but "sector" does
+        not match "sec".
+        """
+        # ponytail: crude suffix list, swap for a stemmer or LLM tagging if recall matters
+        return any(
+            re.search(rf"\b{re.escape(kw.lower())}(?:s|es|d|ed|ing)?\b", text, re.IGNORECASE)
+            for kw in keywords
+        )
     
     def _estimate_catalyst_impact(self, catalyst_type: str, text: str) -> float:
         """Estimate price impact of catalyst based on type and context."""

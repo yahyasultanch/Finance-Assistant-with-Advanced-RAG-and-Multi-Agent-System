@@ -2,17 +2,22 @@
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 import logging
+import time
 from datetime import datetime
 
 from utils.sec_client import SECClient
 from utils.news_client import NewsClient
 from utils.prices import PriceClient
-from rag.chunking import DocumentChunker
+from rag.chunking import DocumentChunker, contextual_header, indexed_text
 from rag.embed import EmbeddingModel
 from rag.vector_store import FAISSVectorStore
 from rag.retriever import HybridRetriever
 
 logger = logging.getLogger(__name__)
+
+# v2: section-aware chunks from real headers, 8-K exhibits, news title/summary metadata
+# v3: contextual chunk headers in embeddings and BM25
+INDEX_VERSION = 3
 
 
 class IngestionAgent:
@@ -28,7 +33,8 @@ class IngestionAgent:
         azure_deployment: str = "text-embedding-ada-002",
         api_version: str = "2024-12-01-preview",
         chunk_size: int = 1000,
-        chunk_overlap: int = 100
+        chunk_overlap: int = 100,
+        reranker=None
     ):
         """
         Initialize ingestion agent.
@@ -43,6 +49,7 @@ class IngestionAgent:
             api_version: Azure OpenAI API version
             chunk_size: Target chunk size in characters
             chunk_overlap: Chunk overlap in characters
+            reranker: Optional cross-encoder used by loaded retrievers
         """
         self.sec_client = SECClient(sec_user_agent, data_dir / "raw")
         self.news_client = NewsClient(sec_client=self.sec_client)  # Pass SEC client for 8-K parsing
@@ -55,6 +62,7 @@ class IngestionAgent:
             api_version
         )
         self.data_dir = data_dir
+        self.reranker = reranker
         self.index_dir = index_dir
         self.index_dir.mkdir(parents=True, exist_ok=True)
 
@@ -124,7 +132,7 @@ class IngestionAgent:
         logger.info("Processing filings and creating chunks...")
         all_chunks = []
         
-        for filing in filings[:10]:  # Process top 10 most recent filings
+        for filing in self._select_filings(filings, limit=10):
             # Download filing
             filepath = self.sec_client.download_filing(filing)
             if not filepath:
@@ -158,8 +166,21 @@ class IngestionAgent:
                 chunks = self.chunker.chunk_filing(text, filing_metadata, sections)
             else:
                 chunks = self.chunker.chunk_text(text, filing_metadata)
-            
+
             all_chunks.extend(chunks)
+
+            # 8-K cover pages just point to EX-99.x, where the content is
+            if filing["form_type"] == "8-K":
+                for exhibit in self.sec_client.get_exhibits(filing):
+                    exhibit_text = self.sec_client.parse_filing_text(exhibit["filepath"])
+                    if len(exhibit_text) < 100:
+                        continue
+                    exhibit_metadata = {
+                        **filing_metadata,
+                        "url": exhibit["url"],
+                        "section": f"Exhibit {exhibit['type'][3:]}",  # "Exhibit 99.1"
+                    }
+                    all_chunks.extend(self.chunker.chunk_text(exhibit_text, exhibit_metadata))
         
         # Add news as chunks
         for news_item in news:
@@ -175,6 +196,8 @@ class IngestionAgent:
                     "filing_date": news_item["date"],
                     "source": news_item["source"],
                     "url": news_item["url"],
+                    "title": news_item["title"],
+                    "summary": news_item["summary"],
                     "section": "Document"  # Add section for citation consistency
                 }
             }
@@ -186,13 +209,37 @@ class IngestionAgent:
         # 6. Build vector index
         if all_chunks:
             logger.info("Building vector index...")
-            index_path = self.index_dir / f"{ticker.lower()}"
+            index_path = self._index_path(ticker)
             vector_store = self._build_index(all_chunks, index_path)
             results["index_path"] = str(index_path)
             logger.info(f"Index saved to: {index_path}")
         
         logger.info(f"Ingestion complete for {ticker}")
         return results
+
+    @staticmethod
+    def _select_filings(
+        filings: List[Dict[str, Any]],
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Pick filings to index: latest 10-K and two latest 10-Qs first, then
+        the most recent remaining filings (mostly 8-Ks) up to the limit, so
+        frequent 8-Ks can't push the annual report out.
+
+        Args:
+            filings: Filing metadata, newest first
+            limit: Maximum number of filings
+
+        Returns:
+            Selected filings
+        """
+        core = (
+            [f for f in filings if f["form_type"] == "10-K"][:1]
+            + [f for f in filings if f["form_type"] == "10-Q"][:2]
+        )
+        rest = [f for f in filings if f not in core]
+        return (core + rest)[:limit]
 
     def _build_index(
         self,
@@ -215,8 +262,10 @@ class IngestionAgent:
             index_path=index_path
         )
         
-        # Generate embeddings in batches
-        texts = [chunk["text"] for chunk in chunks]
+        # Contextual headers: embed (and BM25-index) each chunk with where it came from
+        for chunk in chunks:
+            chunk["context"] = contextual_header(chunk.get("metadata", {}))
+        texts = [indexed_text(chunk) for chunk in chunks]
         logger.info(f"Generating embeddings for {len(texts)} chunks...")
         embeddings = self.embedding_model.embed_documents(texts)
         
@@ -228,20 +277,34 @@ class IngestionAgent:
         
         return vector_store
 
-    def load_index(self, ticker: str) -> Optional[tuple]:
+    def _index_path(self, ticker: str) -> Path:
+        """
+        Versioned index path: bump INDEX_VERSION when chunking or metadata
+        changes so indexes built by older code are rebuilt, not reused. Dots
+        are replaced so with_suffix() can't eat part of tickers like BRK.B.
+        """
+        return self.index_dir / f"{ticker.lower().replace('.', '-')}_v{INDEX_VERSION}"
+
+    def load_index(self, ticker: str, max_age_days: Optional[float] = None) -> Optional[tuple]:
         """
         Load existing index for a ticker.
-        
+
         Args:
             ticker: Stock ticker symbol
-            
+            max_age_days: Treat older indexes as missing (filings and news go stale)
+
         Returns:
             Tuple of (vector_store, retriever) or None
         """
-        index_path = self.index_dir / f"{ticker.lower()}"
-        
-        if not index_path.with_suffix('.faiss').exists():
+        index_path = self._index_path(ticker)
+        index_file = index_path.with_suffix('.faiss')
+
+        if not index_file.exists():
             logger.warning(f"No index found for {ticker}")
+            return None
+        age_days = (time.time() - index_file.stat().st_mtime) / 86400
+        if max_age_days is not None and age_days > max_age_days:
+            logger.info(f"Index for {ticker} is {age_days:.0f} days old, rebuilding")
             return None
         
         # Load vector store
@@ -252,7 +315,7 @@ class IngestionAgent:
         vector_store.load()
         
         # Create retriever
-        retriever = HybridRetriever(vector_store, self.embedding_model)
+        retriever = HybridRetriever(vector_store, self.embedding_model, reranker=self.reranker)
         retriever.index_documents(vector_store.documents)
         
         logger.info(f"Loaded index for {ticker} with {vector_store.size} documents")

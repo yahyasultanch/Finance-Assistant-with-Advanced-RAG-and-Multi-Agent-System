@@ -29,7 +29,10 @@ class ReporterAgent:
         sentiment_results: Dict[str, Any],
         news_items: List[Dict[str, str]],
         rating_results: Dict[str, Any] = None,
-        prediction_results: Dict[str, Any] = None
+        prediction_results: Dict[str, Any] = None,
+        verification: Dict[str, Any] = None,
+        review_note: str = "",
+        track_record: Dict[str, Any] = None
     ) -> str:
         """
         Generate analyst brief in markdown.
@@ -43,6 +46,9 @@ class ReporterAgent:
             news_items: List of news items
             rating_results: Investment rating results (optional)
             prediction_results: Predictive forecasts (optional)
+            verification: Claim verification results from the verifier (optional)
+            review_note: Human reviewer's note (optional)
+            track_record: Prediction ledger summary (optional)
             
         Returns:
             Markdown text of the brief
@@ -55,6 +61,9 @@ class ReporterAgent:
         
         # Executive Summary
         report_sections.append(self._generate_executive_summary(ticker, summaries))
+        
+        if review_note:
+            report_sections.append(f"## Reviewer Note\n\n{review_note}\n")
         
         # Investment Recommendation (new - after executive summary)
         if rating_results:
@@ -97,13 +106,26 @@ class ReporterAgent:
                 "Financial Outlook",
                 summaries["outlook"]
             ))
-        
+
+        # Changes vs the previous brief (only when memory had one and claims verified)
+        if summaries.get("changes", {}).get("citations"):
+            report_sections.append(self._generate_section(
+                "Changes Since Last Brief",
+                summaries["changes"]
+            ))
+
         # Sentiment Analysis
         report_sections.append(self._generate_sentiment_section(sentiment_results, news_items))
-        
+
         # Forward Outlook & Predictions (new)
         if prediction_results:
             report_sections.append(self._generate_predictions_section(prediction_results))
+
+        if track_record:
+            report_sections.append(self._generate_track_record_section(track_record))
+
+        if verification:
+            report_sections.append(self._generate_verification_section(verification))
         
         # Appendix
         report_sections.append(self._generate_appendix(summaries))
@@ -499,14 +521,55 @@ class ReporterAgent:
         
         if all_citations:
             section += "### SEC Filings & Sources\n\n"
+            tiers = {1: "SEC", 2: "Market data", 3: "News", 4: "Social", 5: "Prior brief"}
             for i, citation in enumerate(all_citations, 1):
+                number = citation.get("number", i)
                 source = citation.get("source", "Unknown")
                 url = citation.get("url", "#")
                 date = citation.get("date", "N/A")
-                section += f"{i}. [{source} - {date}]({url})\n"
+                tier = tiers.get(citation.get("tier"), "")
+                tier = f" *({tier})*" if tier else ""
+                section += f"{number}. [{source} - {date}]({url}){tier}\n"
         else:
             section += "*No sources available.*\n"
         
+        return section
+
+    def _generate_track_record_section(self, track_record: Dict[str, Any]) -> str:
+        """How earlier price calls for this ticker turned out (prediction ledger)."""
+        section = "## Prediction Track Record\n\n"
+        if not track_record.get("scored"):
+            return section + (f"No earlier calls have reached their horizon yet "
+                              f"({track_record.get('pending', 0)} pending).\n")
+        section += (
+            f"{track_record['scored']} earlier calls scored against actual prices: direction "
+            f"correct **{track_record['direction_hit_rate']:.0%}**, mean absolute error "
+            f"**{track_record['mean_abs_error_pct']:.1f}%** ({track_record['pending']} pending).\n\n"
+            "| Call | Scored | Direction correct | Mean abs. error |\n"
+            "|------|--------|-------------------|-----------------|\n"
+        )
+        names = {"7d": "7-day", "12m": "12-month", "rating_target": "Rating price target"}
+        for kind, stats in track_record["by_kind"].items():
+            if stats["scored"]:
+                section += (f"| {names[kind]} | {stats['scored']} | {stats['direction_hit_rate']:.0%} "
+                            f"| {stats['mean_abs_error_pct']:.1f}% |\n")
+        return section
+
+    def _generate_verification_section(self, verification: Dict[str, Any]) -> str:
+        """Claim verification summary: coverage and what was removed."""
+        section = "## Citation Verification\n\n"
+        section += (
+            f"**{verification['verified']} of {verification['total']} drafted claims verified "
+            f"({verification['coverage']:.0%})**; first draft: {verification['first_pass_coverage']:.0%}, "
+            f"revision rounds: {verification.get('revisions', 0)}. Each claim's cited source ids must "
+            "exist, its figures must appear in those sources, and an LLM judge must confirm the "
+            "sources support it. Claims that failed were removed from this report:\n\n"
+        )
+        failed = [c for c in verification["claims"] if c["status"] != "verified"]
+        for claim in failed:
+            section += f"- ~~{claim['text']}~~ ({claim['status']}: {claim['reason']})\n"
+        if not failed:
+            section += "*None.*\n"
         return section
 
     def _generate_footer(self) -> str:

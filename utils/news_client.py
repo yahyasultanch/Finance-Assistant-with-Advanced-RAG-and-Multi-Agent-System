@@ -128,28 +128,54 @@ class NewsClient:
             import yfinance as yf
             
             stock = yf.Ticker(ticker)
-            news = stock.news
-            
+            # Ticker.news can come back empty when Yahoo changes its feed;
+            # the search endpoint has stayed reliable
+            news = stock.news or yf.Search(ticker, news_count=max_items).news
+
             headlines = []
             for item in news[:max_items]:
-                # Use thumbnail text or description if available for better sentiment analysis
-                summary = item.get("thumbnail", {}).get("resolutions", [{}])[0].get("tag", "")
-                if not summary or summary == item.get("title", ""):
-                    # Fall back to title + source for context
-                    summary = f"{item.get('title', '')} - {item.get('publisher', 'Yahoo Finance')}"
-                
-                headlines.append({
-                    "title": item.get("title", ""),
-                    "date": datetime.fromtimestamp(item.get("providerPublishTime", 0)).strftime("%Y-%m-%d"),
-                    "source": item.get("publisher", "Yahoo Finance"),
-                    "url": item.get("link", ""),
-                    "summary": summary[:500]
-                })
-            
+                parsed = self._parse_yahoo_item(item)
+                if parsed["title"]:
+                    headlines.append(parsed)
+
             return headlines
         except Exception as e:
             logger.error(f"Error fetching Yahoo Finance news for {ticker}: {e}")
             return []
+
+    @staticmethod
+    def _parse_yahoo_item(item: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Normalize a yfinance news item.
+
+        yfinance >= 0.2.50 nests articles under "content" (title, summary,
+        pubDate, provider, canonicalUrl); older versions used a flat dict
+        (title, publisher, link, providerPublishTime). Both are handled.
+        """
+        content = item.get("content")
+        if content:
+            title = content.get("title") or ""
+            summary = content.get("summary") or content.get("description") or ""
+            source = (content.get("provider") or {}).get("displayName") or "Yahoo Finance"
+            url = ((content.get("canonicalUrl") or {}).get("url")
+                   or (content.get("clickThroughUrl") or {}).get("url") or "")
+            date = (content.get("pubDate") or "")[:10]
+        else:
+            title = item.get("title", "")
+            summary = ""
+            source = item.get("publisher", "Yahoo Finance")
+            url = item.get("link", "")
+            published = item.get("providerPublishTime")
+            date = datetime.fromtimestamp(published).strftime("%Y-%m-%d") if published else ""
+
+        return {
+            "title": title,
+            "date": date,
+            "source": source,
+            "url": url,
+            # Fall back to title + source so sentiment has some context
+            "summary": (summary or f"{title} - {source}")[:500]
+        }
 
     def get_financial_rss_feeds(self, ticker: str, days_back: int = 90) -> List[Dict[str, str]]:
         """

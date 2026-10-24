@@ -75,17 +75,25 @@ class EmbeddingModel:
         """
         return self.embed(query)[0]
 
-    def embed_documents(self, documents: List[str]) -> np.ndarray:
+    def embed_documents(self, documents: List[str], batch_size: int = 100) -> np.ndarray:
         """
-        Generate embeddings for multiple documents.
-        
+        Generate embeddings for multiple documents, in batches to stay under
+        the API's per-request input limits.
+
         Args:
             documents: List of document texts
-            
+            batch_size: Texts per API request
+
         Returns:
             Numpy array of embeddings
         """
-        return self.embed(documents)
+        if not documents:
+            return np.empty((0, self.dimension))
+        batches = [
+            self.embed(documents[i:i + batch_size])
+            for i in range(0, len(documents), batch_size)
+        ]
+        return np.vstack(batches)
 
     @property
     def dimension(self) -> int:

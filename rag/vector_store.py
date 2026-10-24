@@ -81,25 +81,41 @@ class FAISSVectorStore:
         Returns:
             List of (document, score) tuples
         """
+        return [(self.documents[idx], score) for idx, score in self.search_ids(query_embedding, k)]
+
+    def search_ids(
+        self,
+        query_embedding: np.ndarray,
+        k: int = 10
+    ) -> List[Tuple[int, float]]:
+        """
+        Search for similar documents, returning corpus indices.
+
+        Args:
+            query_embedding: Query embedding vector
+            k: Number of results to return
+
+        Returns:
+            List of (document index, score) tuples, best first
+        """
         if self.index.ntotal == 0:
             logger.warning("Index is empty")
             return []
-        
+
         # Normalize query
         query_embedding = query_embedding.reshape(1, -1).astype('float32')
         faiss.normalize_L2(query_embedding)
-        
+
         # Search
         k = min(k, self.index.ntotal)
         distances, indices = self.index.search(query_embedding, k)
-        
-        # Gather results
-        results = []
-        for idx, score in zip(indices[0], distances[0]):
-            if idx < len(self.documents):
-                results.append((self.documents[idx], float(score)))
-        
-        return results
+
+        # FAISS pads with -1 when fewer than k results exist
+        return [
+            (int(idx), float(score))
+            for idx, score in zip(indices[0], distances[0])
+            if 0 <= idx < len(self.documents)
+        ]
 
     def save(self, path: Optional[Path] = None):
         """

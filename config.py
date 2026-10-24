@@ -19,7 +19,7 @@ for directory in [RAW_DATA_DIR, PROCESSED_DATA_DIR, INDEX_DIR, REPORTS_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
 # Azure OpenAI configuration
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "https://yahya-mgcqekep-eastus2.cognitiveservices.azure.com/")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
@@ -37,7 +37,10 @@ SEC_EDGAR_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 TOP_K_RETRIEVAL = int(os.getenv("TOP_K_RETRIEVAL", "8"))
-BM25_TOP_K = 20  # BM25 pre-filter before reranking
+# Cross-encoder applied to fused BM25 + semantic candidates, e.g.
+# "cross-encoder/ms-marco-MiniLM-L-6-v2" or "BAAI/bge-reranker-base". Off by
+# default: on eval/run_eval.py neither beat hybrid + contextual headers.
+RERANKER_MODEL = os.getenv("RERANKER_MODEL", "")
 
 # Processing configuration
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))

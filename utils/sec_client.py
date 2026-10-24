@@ -28,6 +28,7 @@ class SECClient:
         self.base_url = "https://data.sec.gov"
         self.headers = {"User-Agent": user_agent}
         self.rate_limit_delay = 0.1  # SEC requires 10 requests/second max
+        self._cik_cache: Dict[str, str] = {}
 
     def _make_request(self, url: str) -> Optional[Dict]:
         """Make rate-limited request to SEC API."""
@@ -51,14 +52,10 @@ class SECClient:
             CIK as zero-padded string or None
         """
         ticker = ticker.upper()
-        url = f"{self.base_url}/submissions/CIK{ticker}.json"
+        if ticker in self._cik_cache:
+            return self._cik_cache[ticker]
         
-        # Try direct lookup
-        data = self._make_request(url)
-        if data:
-            return data.get("cik")
-        
-        # Fallback: search ticker mapping
+        # SEC's ticker -> CIK mapping
         try:
             tickers_url = "https://www.sec.gov/files/company_tickers.json"
             time.sleep(self.rate_limit_delay)
@@ -69,6 +66,7 @@ class SECClient:
             for entry in tickers_data.values():
                 if entry.get("ticker", "").upper() == ticker:
                     cik = str(entry["cik_str"]).zfill(10)
+                    self._cik_cache[ticker] = cik
                     return cik
         except Exception as e:
             logger.error(f"Error looking up CIK for {ticker}: {e}")
@@ -176,16 +174,79 @@ class SECClient:
 
     def get_company_facts(self, cik: str) -> Optional[Dict]:
         """
-        Get company facts (XBRL data).
-        
+        Get company facts (XBRL data), cached on disk for a day.
+
         Args:
             cik: Company CIK
-            
+
         Returns:
             Company facts data or None
         """
+        cache_file = self.cache_dir / f"CIK{cik}_companyfacts.json"
+        if cache_file.exists() and time.time() - cache_file.stat().st_mtime < 86400:
+            return json.loads(cache_file.read_text(encoding="utf-8"))
+
         url = f"{self.base_url}/api/xbrl/companyfacts/CIK{cik}.json"
-        return self._make_request(url)
+        data = self._make_request(url)
+        if data:
+            cache_file.write_text(json.dumps(data), encoding="utf-8")
+        return data
+
+    def filing_index_url(self, cik: str, accession_number: str) -> str:
+        """URL of a filing's index page (lists every document in the filing)."""
+        return (
+            f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
+            f"{accession_number.replace('-', '')}/{accession_number}-index.htm"
+        )
+
+    def get_exhibits(
+        self,
+        filing: Dict[str, Any],
+        prefixes: Tuple[str, ...] = ("EX-99",)
+    ) -> List[Dict[str, str]]:
+        """
+        Download a filing's exhibits (by default EX-99.x: press releases and
+        commentary, where 8-K earnings numbers actually live).
+
+        Args:
+            filing: Filing metadata dict
+            prefixes: Exhibit type prefixes to keep
+
+        Returns:
+            List of dicts with 'type', 'url', 'filepath'
+        """
+        index_url = self.filing_index_url(filing["cik"], filing["accession_number"])
+        try:
+            time.sleep(self.rate_limit_delay)
+            response = requests.get(index_url, headers=self.headers, timeout=30)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching filing index {index_url}: {e}")
+            return []
+
+        exhibits = []
+        # Index table columns: Seq | Description | Document (link) | Type | Size
+        for row in re.findall(r"<tr[^>]*>(.*?)</tr>", response.text, re.S | re.I):
+            cells = [re.sub(r"<[^>]+>", "", c).strip()
+                     for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S | re.I)]
+            href = re.search(r'href="(/Archives/[^"]+\.htm)"', row, re.I)
+            if len(cells) < 4 or not href or not cells[3].upper().startswith(prefixes):
+                continue
+
+            url = f"https://www.sec.gov{href.group(1)}"
+            filepath = self.cache_dir / f"{filing['accession_number']}_{url.rsplit('/', 1)[-1]}"
+            if not filepath.exists():
+                try:
+                    time.sleep(self.rate_limit_delay)
+                    doc = requests.get(url, headers=self.headers, timeout=60)
+                    doc.raise_for_status()
+                    filepath.write_bytes(doc.content)
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"Error downloading exhibit {url}: {e}")
+                    continue
+            exhibits.append({"type": cells[3].upper(), "url": url, "filepath": str(filepath)})
+
+        return exhibits
 
     def parse_filing_text(self, filepath: str) -> str:
         """

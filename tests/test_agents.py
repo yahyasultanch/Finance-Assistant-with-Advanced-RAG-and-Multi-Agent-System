@@ -156,3 +156,18 @@ def test_memory_carries_over_between_runs():
     assert second["sources"][memory_id]["kind"] == "memory"
     assert "rating HOLD" in second["memory"]["text"]
     assert "memory of earlier briefs loaded" in [t for t in second["trace"] if t["node"] == "planner"][0]["detail"]
+
+
+def test_nan_price_is_not_remembered_and_old_null_records_still_load():
+    store = InMemoryStore()
+    nan = float("nan")
+    verification = {"claims": [], "coverage": 1.0}
+    prediction = {"predictions": {"short_term": {"target_price": nan}, "long_term": {"target_price": nan}}}
+    mem.remember_brief(store, mem.brief_record("NVDA", "2026-11-25", nan, {"price_target": nan}, verification))
+    mem.record_predictions(store, mem.ledger_entries_for("NVDA", "2026-11-25", nan, prediction))
+    # A call stored before prices were checked
+    store.put(("ledger", "NVDA"), "2026-11-24:7d", {"ticker": "NVDA", "kind": "7d", "made_on": "2026-11-24",
+                                                    "price": None, "target": None, "due": "2026-12-01"})
+
+    assert mem.ledger(store, "NVDA") == []
+    assert "price then n/a" in mem.format_memory(mem.recent_briefs(store, "NVDA"))

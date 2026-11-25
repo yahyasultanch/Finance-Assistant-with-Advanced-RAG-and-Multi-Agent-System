@@ -9,12 +9,28 @@ across runs. Two namespaces per ticker:
 Keys are dates, so re-running a ticker on the same day replaces that day's
 records instead of double-counting them.
 """
+import math
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Ledger entry kind -> horizon in days ("rating_target" only appears in
 # ledgers from before the rating adopted the 12-month forecast as its target)
 HORIZONS = {"7d": 7, "12m": 365, "rating_target": 365}
+
+
+def finite(value: Any) -> Optional[float]:
+    """The number if it is a real, positive price; None for None/NaN/0.
+    (NaN is truthy and turns into null in the store's JSON.)"""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _money(value: Any) -> str:
+    value = finite(value)
+    return f"{value:.2f}" if value is not None else "n/a"
 
 
 def brief_record(ticker: str, made_on: str, price: float, rating: Dict[str, Any],
@@ -27,10 +43,10 @@ def brief_record(ticker: str, made_on: str, price: float, rating: Dict[str, Any]
     return {
         "ticker": ticker,
         "date": made_on,
-        "price": price,
+        "price": finite(price),
         "rating": rating.get("rating"),
         "score": rating.get("composite_score"),
-        "price_target": rating.get("price_target"),
+        "price_target": finite(rating.get("price_target")),
         "coverage": verification["coverage"],
         "claims": claims,
     }
@@ -53,7 +69,7 @@ def format_memory(briefs: Sequence[Dict[str, Any]], claims_per_section: int = 2)
     for b in briefs:
         lines = [
             f"Brief of {b['date']}: rating {b['rating']} (score {b['score']}), "
-            f"12M price target {b['price_target']}, price then {b['price']:.2f}, "
+            f"12M price target {_money(b['price_target'])}, price then {_money(b['price'])}, "
             f"citation coverage {b['coverage']:.0%}."
         ]
         for section, texts in b["claims"].items():
@@ -74,7 +90,7 @@ def ledger_entries_for(ticker: str, made_on: str, price: float,
     return [
         {"ticker": ticker, "kind": kind, "made_on": made_on, "price": price, "target": target,
          "due": (due + timedelta(days=HORIZONS[kind])).isoformat()}
-        for kind, target in targets.items() if target and price
+        for kind, target in targets.items() if finite(target) and finite(price)
     ]
 
 
@@ -84,7 +100,9 @@ def record_predictions(store, entries: List[Dict[str, Any]]) -> None:
 
 
 def ledger(store, ticker: str) -> List[Dict[str, Any]]:
-    return sorted((item.value for item in store.search(("ledger", ticker), limit=10000)),
+    # Skips calls stored without a usable price (written before prices were checked)
+    entries = (item.value for item in store.search(("ledger", ticker), limit=10000))
+    return sorted((e for e in entries if finite(e.get("price")) and finite(e.get("target"))),
                   key=lambda e: (e["made_on"], e["kind"]))
 
 

@@ -35,8 +35,10 @@ class PriceClient:
         """
         try:
             stock = yf.Ticker(ticker)
-            df = stock.history(period=period, interval=interval)
-            
+            # Yahoo can return the current, unfinished bar with a NaN close;
+            # it would make "latest close" (and everything derived) NaN
+            df = stock.history(period=period, interval=interval).dropna(subset=["Close"])
+
             if df.empty:
                 logger.error(f"No price data found for {ticker}")
                 return None

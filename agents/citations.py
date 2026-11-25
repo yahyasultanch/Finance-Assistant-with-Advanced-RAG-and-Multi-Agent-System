@@ -8,6 +8,8 @@ Claims cite source ids, and checks run on each claim:
      scaling: "$46.7 billion" matches "46,743,000,000")
   3. an LLM judge confirms the sources support the claim (in the graph's
      verifier, since it needs the model)
+A claim failing check 1 or 2 is first re-attributed to the retrieved source
+that does contain its figures, if one exists (reattribute).
 """
 import hashlib
 import re
@@ -85,6 +87,13 @@ def deep_link(source: Dict[str, Any], words: int = 6) -> str:
     return f"{url}#:~:text={quote(' '.join(plain[:words]))}"
 
 
+def filing_folder(url: str) -> str:
+    """Accession-number folder of an EDGAR document: an 8-K and its exhibits
+    share it (the CIK before it is zero-padded in some URLs, not in others)."""
+    parts = url.split("#")[0].rstrip("/").split("/")
+    return parts[-2] if len(parts) >= 2 else url
+
+
 def numbers_in(text: str) -> List[float]:
     """
     Numbers a claim asserts, skipping years and small counts.
@@ -139,6 +148,39 @@ def check_claim(claim: Dict[str, Any], sources: Dict[str, Dict[str, Any]]) -> Di
 
     reason = f"Ignored unknown ids {unknown}" if unknown else ""
     return {**result, "status": "ok", "reason": reason}
+
+
+def reattribute(claim: Dict[str, Any], sources: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Repair a citation the model attached to the wrong source. Small models
+    shown several similar sources (six "8-K#Event"s) sometimes cite a
+    neighbour's id. If the claim's figures are missing from what it cites,
+    re-point it to the retrieved source that contains all of them and shares
+    the most words with it. The LLM judge still checks the result, so a
+    wrong repair is caught there.
+
+    Returns:
+        The claim re-checked against its new source, or unchanged if no
+        source contains every figure
+    """
+    figures = numbers_in(claim["text"])
+    if claim.get("status") not in ("number_mismatch", "bad_citation") or not figures:
+        return claim
+    words = set(re.findall(r"[a-z]{4,}", claim["text"].lower()))
+    candidates = [
+        (len(words & set(re.findall(r"[a-z]{4,}", source["text"].lower()))), sid)
+        for sid, source in sources.items()
+        # Only primary sources: never move a claim onto the system's own memory
+        if source["kind"] != "memory"
+        and all(number_supported(f, [abs(n) for n in numbers_in_raw(source["text"])]) for f in figures)
+    ]
+    if not candidates:
+        return claim
+    sid = max(candidates)[1]
+    repaired = check_claim({**claim, "sources": [sid]}, sources)
+    if repaired["status"] == "ok":
+        repaired["reason"] = f"citation re-attributed from {claim['sources'] or 'none'} to {sid}"
+    return repaired
 
 
 def numbers_in_raw(text: str) -> List[float]:

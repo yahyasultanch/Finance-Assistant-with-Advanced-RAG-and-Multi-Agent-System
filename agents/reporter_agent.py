@@ -570,6 +570,11 @@ class ReporterAgent:
             section += f"- ~~{claim['text']}~~ ({claim['status']}: {claim['reason']})\n"
         if not failed:
             section += "*None.*\n"
+        # Omissions found by the completeness check that the last revision didn't fix
+        missing = verification.get("missing_events") or []
+        if missing:
+            section += "\n**Material events this brief does not cover** (recent 8-Ks):\n\n"
+            section += "".join(f"- {m}\n" for m in missing)
         return section
 
     def _generate_footer(self) -> str:

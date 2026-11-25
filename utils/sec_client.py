@@ -370,6 +370,23 @@ class SECClient:
             logger.error(f"Error parsing 8-K items from {filepath}: {e}")
             return []
 
+    def exhibit_lead(self, filing: Dict[str, Any], max_chars: int = 700) -> Tuple[str, str]:
+        """
+        Headline and opening text of an 8-K's first EX-99 exhibit (the press
+        release), which says what happened; the 8-K items only say which
+        kind of event it was. ("", "") when the filing has no EX-99.
+        """
+        for exhibit in self.get_exhibits(filing):
+            text = self.parse_filing_text(exhibit["filepath"]).replace("�", " ")
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if lines and lines[0].upper().startswith("EX-"):
+                lines = lines[5:]  # EDGAR header: type, sequence, file name, type, description
+            if lines and re.match(r"exhibit\s+99", lines[0], re.I):
+                lines = lines[1:]  # some press releases repeat "Exhibit 99.1" as their first line
+            if lines:
+                return lines[0][:200], " ".join(" ".join(lines).split())[:max_chars]
+        return "", ""
+
     def extract_8k_event_summary(self, filing: Dict[str, Any]) -> str:
         """
         Generate a human-readable summary of an 8-K event.

@@ -1,6 +1,7 @@
 """Checks for citation verification and the LangGraph flow (stub LLM, no API calls)."""
 import sys
 from pathlib import Path
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -10,9 +11,10 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 
 from agents import memory as mem
-from agents.citations import check_claim, make_source, numbers_in, number_supported
-from agents.graph import Draft, Judgement, Judgements, Plan, Task, build_brief_graph
+from agents.citations import check_claim, make_source, numbers_in, number_supported, reattribute
+from agents.graph import Draft, Judgement, Judgements, Omissions, Plan, Task, build_brief_graph
 from agents.tools import ResearchContext, ROLES
+from eval.run_eval import event_recall
 
 RISK = make_source("filing", "10-K#Risk Factors", "NVDA 10-K Risk Factors", "https://sec.gov/x",
                    "2026-02-25", "Revenue was $46,743 million, up 56% from the prior year.")
@@ -46,7 +48,7 @@ def test_source_ids_are_stable_content_hashes():
 
 
 class StubLLM:
-    """Scripted outputs: the first draft cites a missing id, the second is fixed."""
+    """Scripted outputs: the first draft has an unsupported figure, the second is fixed."""
 
     def __init__(self):
         self.drafts = 0
@@ -59,8 +61,10 @@ class StubLLM:
                                Task(researcher="news", objective="events")])
         if model is Draft:
             self.drafts += 1
-            source = "S000000" if self.drafts == 1 else RISK["id"]
-            return Draft(risks=[{"text": "Revenue was $46.7 billion.", "sources": [source]}])
+            # First draft: a figure no retrieved source contains, so citation repair can't save it
+            if self.drafts == 1:
+                return Draft(risks=[{"text": "Revenue was $99.9 billion.", "sources": ["S000000"]}])
+            return Draft(risks=[{"text": "Revenue was $46.7 billion.", "sources": [RISK["id"]]}])
         if model is Judgements:
             return Judgements(judgements=[Judgement(index=0, supported=True)])
         raise AssertionError(model)
@@ -114,8 +118,8 @@ def test_graph_revises_failed_draft_then_pauses_for_review():
     verification = done["result"]["verification"]
     assert (verification["first_pass_coverage"], verification["coverage"], verification["revisions"]) == (0.0, 1.0, 1)
     assert (orc.llm.plans, orc.llm.drafts) == (2, 2)
-    # Two tasks per plan ran as parallel researcher branches, twice
-    assert sum(e["node"].startswith("researcher") for e in done["trace"]) == 4
+    # Parallel researcher branches: 2 planned + the mandatory recent-events task, then 2 on revision
+    assert sum(e["node"].startswith("researcher") for e in done["trace"]) == 5
     assert done["result"]["summaries"]["risks"]["summary"] == \
         "- Revenue was $46.7 billion. [1:10-K#Risk Factors]"
 
@@ -151,7 +155,15 @@ def test_memory_carries_over_between_runs():
     assert [b["rating"] for b in mem.recent_briefs(store, "NVDA")] == ["HOLD"]
     assert sorted(e["kind"] for e in mem.ledger(store, "NVDA")) == ["12m", "7d"]
 
-    second = graph.invoke({"ticker": "NVDA"}, {"configurable": {"thread_id": "m2"}})
+    # A same-day rerun must not treat its own earlier output as the last brief
+    assert graph.invoke({"ticker": "NVDA"}, {"configurable": {"thread_id": "m2"}})["memory"] == {}
+
+    # Date today's record as yesterday's: now it is an earlier brief
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    record = mem.recent_briefs(store, "NVDA")[0]
+    store.delete(("memory", "NVDA"), record["date"])
+    mem.remember_brief(store, {**record, "date": yesterday})
+    second = graph.invoke({"ticker": "NVDA"}, {"configurable": {"thread_id": "m3"}})
     memory_id = second["memory"]["id"]
     assert second["sources"][memory_id]["kind"] == "memory"
     assert "rating HOLD" in second["memory"]["text"]
@@ -171,3 +183,64 @@ def test_nan_price_is_not_remembered_and_old_null_records_still_load():
 
     assert mem.ledger(store, "NVDA") == []
     assert "price then n/a" in mem.format_memory(mem.recent_briefs(store, "NVDA"))
+
+
+class OmissionLLM(StubLLM):
+    """Draft is fully verified, but leaves out the recent 8-K on the first pass."""
+
+    def __init__(self):
+        super().__init__()
+        self.checks = 0
+        self.analyst_prompts = []
+
+    def structured(self, messages, model):
+        if model is Omissions:
+            self.checks += 1
+            return Omissions(missing=[0] if self.checks == 1 else [])
+        if model is Draft:
+            self.analyst_prompts.append(messages[-1]["content"])
+            self.drafts += 1
+            return Draft(risks=[{"text": "Revenue was $46.7 billion.", "sources": [RISK["id"]]}])
+        return super().structured(messages, model)
+
+
+def test_missing_material_event_triggers_a_revision():
+    orc = StubOrchestrator()
+    orc.llm = OmissionLLM()
+    orc.ctx.news_items = [{"source": "SEC 8-K", "date": date.today().isoformat(), "url": "u",
+                           "title": "8-K: NVIDIA Announces CEO Transition", "summary": "Jensen Huang resigns."}]
+    done = build_brief_graph(orc, InMemorySaver()).invoke({"ticker": "NVDA"}, {"configurable": {"thread_id": "e1"}})
+
+    verification = done["result"]["verification"]
+    # Every claim verified, yet the omission alone sent the draft back once
+    assert (verification["first_pass_coverage"], verification["revisions"]) == (1.0, 1)
+    assert "CEO Transition" in orc.llm.analyst_prompts[1]
+    assert verification["missing_events"] == []
+
+
+def test_event_recall_counts_filings_cited_by_verified_claims():
+    folder = "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000082"
+    events = [
+        {"date": "2026-11-12", "headline": "NVIDIA Announces CEO Transition", "url": f"{folder}/nvda-8k.htm"},
+        {"date": "2026-11-23", "headline": "Board Reinstates Jensen Huang", "url": f"{folder}9/nvda-8k.htm"},
+        {"date": "2026-11-01", "headline": "", "url": f"{folder}7/nvda-8k.htm"},  # no press release: not in the key
+    ]
+    # Cited via the exhibit (same accession folder, CIK not zero-padded), with a text fragment
+    exhibit = folder.replace("/1045810/", "/0001045810/") + "/ex99.htm#:~:text=Jensen"
+    result = {"summaries": {"events": {"citations": [{"url": exhibit}]}}}
+    covered, key = event_recall(result, events)
+    assert [e["date"] for e in covered] == ["2026-11-12"] and len(key) == 2
+
+
+def test_misattributed_citation_is_repaired_to_the_source_with_the_figures():
+    ceo = make_source("event", "8-K#Event", "", "u1", "2026-11-12", "8-K 2026-11-12: Jensen Huang resigns as CEO.")
+    results = make_source("event", "8-K#Event", "", "u2", "2026-11-17",
+                          "8-K 2026-11-17: Q3 revenue of $115.8 billion, up 103% year over year.")
+    sources = {s["id"]: s for s in (ceo, results)}
+    claim = {"text": "On November 17, NVIDIA reported revenue of $115.8 billion, up 103%.", "sources": [ceo["id"]]}
+
+    repaired = reattribute(check_claim(claim, sources), sources)
+    assert (repaired["status"], repaired["sources"]) == ("ok", [results["id"]])
+    # Figures no retrieved source contains: left as a failure
+    made_up = {"text": "Revenue was $999.9 billion.", "sources": [ceo["id"]]}
+    assert reattribute(check_claim(made_up, sources), sources)["status"] == "number_mismatch"

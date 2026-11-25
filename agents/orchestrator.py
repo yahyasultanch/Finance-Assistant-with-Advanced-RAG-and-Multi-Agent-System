@@ -209,6 +209,7 @@ class Orchestrator:
             news_items.append({
                 "title": meta.get("title", doc.get("text", "")),
                 "summary": meta.get("summary", ""),
+                "headline": meta.get("headline", ""),
                 "date": meta.get("filing_date", ""),
                 "source": meta.get("source", ""),
                 "url": meta.get("url", ""),

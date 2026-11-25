@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 # v2: section-aware chunks from real headers, 8-K exhibits, news title/summary metadata
 # v3: contextual chunk headers in embeddings and BM25
 # v4: safe-harbor disclaimers dropped, Yahoo news filtered to the company
-INDEX_VERSION = 4
+# v5: 8-K events carry the press-release headline and lead, dated titles
+INDEX_VERSION = 5
 
 
 class IngestionAgent:
@@ -199,6 +200,7 @@ class IngestionAgent:
                     "url": news_item["url"],
                     "title": news_item["title"],
                     "summary": news_item["summary"],
+                    "headline": news_item.get("headline", ""),
                     "section": "Document"  # Add section for citation consistency
                 }
             }

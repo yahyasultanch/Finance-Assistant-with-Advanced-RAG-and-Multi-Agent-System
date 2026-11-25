@@ -66,24 +66,26 @@ class NewsClient:
         
         for filing in filings:
             if filing["form_type"] == "8-K":
-                # Try to get detailed event summary if SEC client is available
+                date = filing["filing_date"]
+                headline = ""
+                summary = f"Material event reported via 8-K on {date}"
                 if self.sec_client and filing.get('filepath'):
                     try:
-                        event_summary = self.sec_client.extract_8k_event_summary(filing)
-                        title = f"8-K: {event_summary[:100]}"
-                        summary = event_summary
+                        summary = self.sec_client.extract_8k_event_summary(filing)
+                        # The press release says what happened; the item type
+                        # alone ("Departure/Election of Directors") does not
+                        headline, lead = self.sec_client.exhibit_lead(filing)
+                        if lead:
+                            summary = f"{summary}. Press release: {lead}"
                     except Exception as e:
                         logger.warning(f"Could not parse 8-K details: {e}")
-                        title = f"8-K Filing: {filing['filing_date']}"
-                        summary = f"Material event reported via 8-K on {filing['filing_date']}"
-                else:
-                    # Fallback to generic description
-                    title = f"8-K Filing: {filing['filing_date']}"
-                    summary = f"Material event reported via 8-K on {filing['filing_date']}"
-                
+
                 news_items.append({
-                    "title": title,
-                    "date": filing["filing_date"],
+                    # Date in the title: two 8-Ks of the same item type must
+                    # not collapse into one in deduplication
+                    "title": f"8-K {date}: {headline or summary[:100]}",
+                    "headline": headline,
+                    "date": date,
                     "source": "SEC 8-K",
                     "url": filing["document_url"],
                     "summary": summary

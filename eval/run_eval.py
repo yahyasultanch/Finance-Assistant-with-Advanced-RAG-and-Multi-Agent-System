@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import config  # noqa: E402
+from agents.citations import filing_folder  # noqa: E402
 from agents.ingestion_agent import IngestionAgent  # noqa: E402
 from rag.reranker import CrossEncoderReranker  # noqa: E402
 from rag.retriever import HybridRetriever  # noqa: E402
@@ -135,7 +136,23 @@ def retrieval_eval(tickers):
     return table, answerable
 
 
+def event_recall(result, events):
+    """
+    Material events covered by the brief. The answer key is every recent 8-K
+    with a press-release headline (no hand labels); an event counts as
+    covered when a verified claim cites that filing or one of its exhibits.
+
+    Returns:
+        (covered events, key events)
+    """
+    cited = {filing_folder(c["url"]) for section in result["summaries"].values()
+             for c in section["citations"] if c.get("url")}
+    key = [e for e in events if e.get("headline")]
+    return [e for e in key if filing_folder(e["url"]) in cited], key
+
+
 def brief_eval(tickers):
+    from agents.graph import RECENT_DAYS
     from agents.orchestrator import Orchestrator
     orc = Orchestrator.from_config()
     rows = []
@@ -143,12 +160,15 @@ def brief_eval(tickers):
         start = time.time()
         result = orc.generate_brief(ticker)
         v, usage = result["verification"], result["usage"]
+        covered, key = event_recall(result, orc.context(ticker).recent_events(RECENT_DAYS))
         rows.append({
             "ticker": ticker, "claims": v["total"], "verified": v["verified"],
             "first_pass": v["first_pass_coverage"], "coverage": v["coverage"],
             "revisions": v["revisions"], "calls": usage["calls"],
             "tokens": usage["prompt_tokens"] + usage["completion_tokens"],
             "seconds": time.time() - start,
+            "events": f"{len(covered)}/{len(key)}",
+            "missed": [f"{e['date']} {e['headline']}" for e in key if e not in covered],
         })
     return rows
 
@@ -175,14 +195,19 @@ def main():
         rows = brief_eval(tickers)
         lines += [
             "", "## End-to-end briefs", "",
-            "| Ticker | Claims | Verified | First draft | Final | Revisions | LLM calls | Tokens | Seconds |",
-            "|--------|--------|----------|-------------|-------|-----------|-----------|--------|---------|",
+            "| Ticker | Claims | Verified | First draft | Final | Event recall | Revisions | LLM calls | Tokens | Seconds |",
+            "|--------|--------|----------|-------------|-------|--------------|-----------|-----------|--------|---------|",
         ]
         lines += [
             f"| {r['ticker']} | {r['claims']} | {r['verified']} | {r['first_pass']:.0%} | "
-            f"{r['coverage']:.0%} | {r['revisions']} | {r['calls']} | {r['tokens']:,} | {r['seconds']:.0f} |"
+            f"{r['coverage']:.0%} | {r['events']} | {r['revisions']} | {r['calls']} | {r['tokens']:,} | "
+            f"{r['seconds']:.0f} |"
             for r in rows
         ]
+        lines += ["", "Event recall: recent 8-Ks with a press release (last 90 days) that a "
+                      "verified claim cites."]
+        for r in rows:
+            lines += [f"- {r['ticker']} missed: {m}" for m in r["missed"]]
 
     report = "\n".join(lines) + "\n"
     (ROOT / "eval" / "results.md").write_text(report, encoding="utf-8")

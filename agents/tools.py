@@ -5,6 +5,7 @@ every source with its [S...] id so the model can cite it.
 """
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field
@@ -31,6 +32,12 @@ class ResearchContext:
     report: str = ""                       # latest brief, for the chat agent
     extra: Dict[str, Any] = field(default_factory=dict)
 
+    def recent_events(self, days: int = 90) -> List[Dict[str, Any]]:
+        """8-K events filed in the last `days`, newest first."""
+        since = (date.today() - timedelta(days=days)).isoformat()
+        return sorted((n for n in self.news_items if n.get("source") == "SEC 8-K" and n.get("date", "") >= since),
+                      key=lambda n: n["date"], reverse=True)
+
     def inventory(self) -> Dict[str, int]:
         """Chunk counts by form#section, so planners know what's indexed."""
         return dict(Counter(
@@ -40,13 +47,15 @@ class ResearchContext:
 
 
 class SearchFilingsArgs(BaseModel):
-    query: str = Field(description="What to look for, in natural language")
+    query: str = Field(min_length=1, description="What to look for, in natural language")
     form_types: List[FormType] = Field(default=[], description="Restrict to these forms; empty = all")
     sections: List[str] = Field(
         default=[],
         description="Restrict to sections, e.g. 'Business', 'Risk Factors', 'MD&A', "
                     "'Financial Statements', 'Exhibit 99.1' (8-K press release)",
     )
+    since: str = Field(default="", description="Only documents filed on or after this date "
+                                                "(YYYY-MM-DD), e.g. for recent events; empty = any date")
     k: int = Field(default=6, ge=1, le=10, description="Number of passages")
 
 
@@ -83,11 +92,12 @@ def build_tools(ctx: ResearchContext, sec_client) -> Dict[str, Tool]:
             filters["form_type"] = args.form_types
         if args.sections:
             filters["section"] = args.sections
-        results = ctx.retriever.retrieve(args.query, k=args.k, filters=filters)
+        results = ctx.retriever.retrieve(args.query, k=args.k, filters=filters, since=args.since or None)
         if not results:
             # Tell the model why and what exists, so it can retry instead of giving up
             return ToolOutput(
-                f"No passages matched filters {filters or 'none'} for this query. "
+                f"No passages matched filters {filters or 'none'}"
+                f"{f' since {args.since}' if args.since else ''} for this query. "
                 f"Indexed chunks by form#section: {ctx.inventory()}. "
                 "Retry with filters that exist above, or none."
             )

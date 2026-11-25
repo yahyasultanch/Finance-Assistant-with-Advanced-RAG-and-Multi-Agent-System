@@ -24,7 +24,8 @@ This system revolutionizes the investment research process by:
 - **Planner**: Splits the brief into 3-6 research tasks and assigns each to a specialist researcher, based on what is actually indexed
 - **Parallel researchers**: Fanned out with LangGraph `Send`; each runs its own tool-calling loop (filings, financials or news toolset)
 - **Analyst**: Synthesizes the research notes into structured claims (Pydantic-validated JSON), each citing source ids
-- **Verifier**: Checks every claim; if under 80% verify, the graph loops back to the planner with targeted tasks for the failed claims
+- **Recent-events task**: Every plan also gets a fixed task covering all material events of the last 90 days (8-K press releases, searched with a date filter), because relevance ranking alone lets an old 10-K paragraph outrank last week's news
+- **Verifier**: Checks every claim, then checks the draft for *omissions* against recent 8-Ks. If under 80% of claims verify, or a material event is missing, the graph loops back to the planner with targeted tasks
 - **Human-in-the-loop**: Optional `interrupt()` pauses the graph for approve/reject before publishing; state persists in a SQLite checkpointer, so the run resumes exactly where it stopped
 - **Follow-up chat**: A second graph answers questions with the same tools; conversation memory is the checkpointer thread
 
@@ -37,7 +38,7 @@ This system revolutionizes the investment research process by:
 ### Tool Calling
 - Tools are typed: Pydantic argument models become OpenAI function schemas
 - The tool loop is hand-written (`agents/llm.py`) to keep the protocol visible: parallel `tool_calls` run concurrently, tool errors go back to the model as observations, and a step budget forces a final answer
-- Tools: `search_filings` (hybrid search with form/section filters), `get_financial_metrics` (SEC XBRL), `get_recent_events` (8-K items), `get_news`, `get_discussions` (Hacker News, plus Reddit when configured), `get_price_summary`
+- Tools: `search_filings` (hybrid search with form/section/date filters), `get_financial_metrics` (SEC XBRL), `get_recent_events` (8-K events with their press-release headline and lead), `get_news`, `get_discussions` (Hacker News, plus Reddit when configured), `get_price_summary`
 - Empty results say what *is* indexed, so the agent can retry with filters that exist
 - Community discussion is tagged as the *social* tier: the analyst may report what people are discussing, never use it as evidence for a fact
 
@@ -60,38 +61,42 @@ Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` to trace every run: LangGra
 
 ### Advanced RAG Pipeline
 - **Section-aware chunking**: 10-K/10-Q sections found from their real headers (skipping table-of-contents entries and cross-references); ~1000-character chunks with 100-character overlap
-- **8-K exhibits**: EX-99.x press releases and CFO commentary are indexed, not just the 8-K cover page
+- **8-K exhibits**: EX-99.x press releases and CFO commentary are indexed, not just the 8-K cover page. Each 8-K event also carries its press-release headline and opening paragraph: the item type alone ("Departure/Election of Directors or Officers") doesn't say *what* happened
 - **Contextual chunk headers**: each chunk is embedded and BM25-indexed with a header like `NVDA 10-K (filed 2026-02-25) · Risk Factors`, so queries can match company, form, period and section
 - **Safe-harbor filtering**: forward-looking-statement disclaimers ("...are forward-looking statements within the meaning of Section 27A...") are dropped at chunking. They list topics like growth and demand without saying anything, yet match outlook queries well, so they used to push real guidance out of the results. A chunk is dropped when it has 2 or more distinct disclaimer phrases, so guidance sentences that only mention "expected" stay
-- **Hybrid retrieval**: BM25 + Azure OpenAI embeddings fused with weighted Reciprocal Rank Fusion, with metadata filters (form type, section)
+- **Hybrid retrieval**: BM25 + Azure OpenAI embeddings fused with weighted Reciprocal Rank Fusion, with metadata filters (form type, section, filed-since date)
 - **Optional cross-encoder reranker** (`RERANKER_MODEL`): rescores the fused candidates locally. Off by default, because the evaluation below showed it doesn't help on this corpus
-- **FAISS vector store**: Versioned, persisted indexes (currently v4), rebuilt automatically when older than 7 days or when the index version changes
+- **FAISS vector store**: Versioned, persisted indexes (currently v5), rebuilt automatically when older than 7 days or when the index version changes
 
 ### Evaluation
-`python eval/run_eval.py NVDA AAPL [--briefs]` runs a retrieval ablation over 12 generic analyst questions with silver relevance labels (expected form/section + keyword pattern), and optionally full briefs. Latest run on the v4 index ([eval/results.md](eval/results.md)), 24 question-ticker pairs:
+`python eval/run_eval.py NVDA AAPL [--briefs]` runs a retrieval ablation over 12 generic analyst questions with silver relevance labels (expected form/section + keyword pattern), and optionally full briefs, scored for citation coverage and **event recall**. Latest run on the v5 index ([eval/results.md](eval/results.md)), 24 question-ticker pairs:
 
 | Setup | hit@5 | MRR@10 | P@5 |
 |-------|-------|--------|-----|
-| BM25 only | 0.92 | 0.81 | 0.65 |
-| Semantic only | 0.92 | 0.92 | 0.83 |
-| Hybrid (RRF) | 0.92 | 0.90 | 0.82 |
-| **Hybrid + contextual headers** (default) | **0.96** | **0.94** | **0.89** |
-| + reranker, ms-marco-MiniLM-L-6-v2 | 0.96 | 0.90 | 0.82 |
+| BM25 only | 0.92 | 0.82 | 0.71 |
+| Semantic only | 0.92 | 0.93 | 0.82 |
+| Hybrid (RRF) | 0.92 | 0.88 | 0.82 |
+| **Hybrid + contextual headers** (default) | **0.96** | **0.96** | **0.90** |
+| + reranker, ms-marco-MiniLM-L-6-v2 | 0.96 | 0.92 | 0.84 |
 
-Takeaways: contextual headers give the best ranking (+0.07 P@5 and +0.04 MRR over plain hybrid). The cross-encoder undoes that gain on SEC text; `bge-reranker-base`, measured on the v3 index, didn't help either (MRR 0.89), so reranking stays opt-in. Plain hybrid trails semantic-only slightly because BM25 is weak on these natural-language questions; the headers are what make the fusion pay off. The question set is small and hit@5 is near its ceiling, so treat differences under ~0.03 as noise.
+Takeaways: contextual headers give the best ranking (+0.08 P@5 and +0.08 MRR over plain hybrid). The cross-encoder undoes that gain on SEC text; `bge-reranker-base`, measured on the v3 index, didn't help either (MRR 0.89), so reranking stays opt-in. Plain hybrid trails semantic-only slightly because BM25 is weak on these natural-language questions; the headers are what make the fusion pay off. The question set is small and hit@5 is near its ceiling, so treat differences under ~0.03 as noise.
 
 End-to-end briefs (same run):
 
-| Ticker | Claims | Verified | Revisions | LLM calls | Tokens | Seconds |
-|--------|--------|----------|-----------|-----------|--------|---------|
-| NVDA | 15 | 14 (93%) | 0 | 16 | 26,973 | 32 |
-| AAPL | 19 | 17 (89%) | 0 | 16 | 30,578 | 27 |
+| Ticker | Claims | Verified | Event recall | Revisions | LLM calls | Tokens | Seconds |
+|--------|--------|----------|--------------|-----------|-----------|--------|---------|
+| NVDA | 17 | 16 (94%) | 3/3 | 1 | 27 | 67,625 | 49 |
+| AAPL | 18 | 17 (94%) | 1/1 | 1 | 28 | 65,660 | 51 |
 
-Both drafts cleared the 80% threshold on the first pass, so the revision loop didn't trigger (the graph tests cover it). Each brief costs under a cent on gpt-4o-mini.
+**Event recall** is the share of recent 8-Ks with a press release (last 90 days) that a verified claim cites; the press-release headlines are an automatic answer key, so no hand labels are needed, and the check doesn't use the LLM judge. It was added after a v4 brief scored 93% on citations while missing NVIDIA's CEO resignation and reinstatement: the event tool passed only the 8-K item type, deduplication merged two same-type 8-Ks, and nothing checked completeness. On v4 that brief would have scored 0/2 on those events.
+
+Completeness costs more: the recent-events task, the omission check and the revision it can trigger take a brief from ~16 to ~28 LLM calls and from ~30k to ~65k tokens (still a few cents on gpt-4o-mini). Results vary between runs (LLM sampling), so judge single-run differences cautiously.
 
 ### Sources and Citations
 - **Source registry**: Every tool result becomes sources with content-hash ids (`[S3f9a2c]`), so parallel agents never collide
 - **Claim verification**: Each claim must (1) cite ids that exist, (2) contain only figures that appear in its sources (unit-aware: "$46.7 billion" matches "46,743,000,000"), and (3) pass an LLM-judge support check
+- **Citation repair**: small models sometimes attach a fact to a neighbouring source's id. A claim failing check 1 or 2 is re-pointed to the retrieved primary source that contains all its figures (never to memory), then still goes through the judge
+- **Completeness check**: recent 8-K events that no verified claim cites are shown to an LLM, which lists the material ones the draft omits; those trigger a revision, and any still missing are listed in the report
 - **Measured coverage**: The report states how many claims verified and lists the removed ones with reasons
 - **Deep links and trust tiers**: Filing citations link to the quoted passage (`#:~:text=`); sources are tiered SEC > market data > news > social
 
@@ -423,7 +428,7 @@ FinanceAnalyst/
 python -m pytest -q
 ```
 
-21 tests. The graph tests drive the full LangGraph flow (fan-out, verifier revision loop, interrupt and resume, memory carried between runs) with a stub LLM, so they need no API keys. Others cover retrieval and RRF, citation checks, the MCP tool listing, safe-harbor filtering and news relevance.
+26 tests. The graph tests drive the full LangGraph flow (fan-out, verifier revision loop, omission-triggered revision, interrupt and resume, memory carried between days) with a stub LLM, so they need no API keys. Others cover retrieval, RRF and date filters, citation checks and repair, event recall, the MCP tool listing, safe-harbor filtering and news relevance.
 
 
 ### Models

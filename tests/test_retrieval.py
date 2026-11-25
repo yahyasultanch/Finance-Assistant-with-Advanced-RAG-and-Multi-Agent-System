@@ -166,3 +166,10 @@ def test_contextual_header_and_indexed_text():
     assert contextual_header(meta) == "NVDA 10-K (filed 2026-02-25) · Risk Factors"
     assert indexed_text({"text": "Competition is intense.", "context": "NVDA 10-K"}) == \
         "NVDA 10-K\nCompetition is intense."
+
+
+def test_since_keeps_only_recent_filings():
+    docs = [{"text": "chief executive officer resigns", "id": 0, "metadata": {"filing_date": "2026-02-25"}},
+            {"text": "chief executive officer resigns", "id": 1, "metadata": {"filing_date": "2026-11-12"}}]
+    retriever = _retriever(docs, [_vec(1), _vec(1)], query_vec=_vec(1))
+    assert [d["id"] for d, _ in retriever.retrieve("officer resigns", k=2, since="2026-08-27")] == [1]

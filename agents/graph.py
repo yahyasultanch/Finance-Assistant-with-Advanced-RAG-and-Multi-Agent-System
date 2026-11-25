@@ -19,7 +19,7 @@ up by ticker inside the nodes.
 """
 import logging
 import operator
-from datetime import date
+from datetime import date, timedelta
 from typing import Annotated, Any, Dict, List, Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -28,7 +28,7 @@ from langgraph.types import Send, interrupt
 from pydantic import BaseModel, Field
 
 from agents import memory as mem
-from agents.citations import check_claim, deep_link, make_source
+from agents.citations import check_claim, deep_link, filing_folder, make_source, reattribute
 from agents.tools import ROLES
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ SECTIONS = {
 MIN_COVERAGE = 0.8   # share of claims that must verify before skipping a revision
 MAX_REVISIONS = 1
 MAX_TASKS = 6
+RECENT_DAYS = 90     # window for the mandatory recent-events task and the completeness check
 
 DEFAULT_PLAN = [
     {"researcher": "filings", "objective": "Business model, segments and strategy from the latest 10-K Business section"},
@@ -95,7 +96,9 @@ class Task(BaseModel):
 
 
 class Plan(BaseModel):
-    tasks: List[Task] = Field(min_length=1, max_length=MAX_TASKS)
+    # No max_length: the planner sometimes returns one task too many, and a
+    # validation retry costs a whole LLM call; the planner trims to MAX_TASKS
+    tasks: List[Task] = Field(min_length=1)
 
 
 class Claim(BaseModel):
@@ -120,6 +123,18 @@ class Judgement(BaseModel):
 
 class Judgements(BaseModel):
     judgements: List[Judgement]
+
+
+class Omissions(BaseModel):
+    missing: List[int] = []   # indexes of material events the draft does not cover
+
+
+def recent_events_task(since: str) -> Dict[str, str]:
+    """Always planned: relevance search alone ranks last week's 8-K below old 10-K text."""
+    return {"researcher": "news", "objective": (
+        f"Every material event since {since}: list the recent 8-Ks with get_recent_events, then "
+        f"search_filings with since={since} and sections ['Exhibit 99.1'] for the details of each "
+        "(leadership changes, results with their figures, deals, guidance, legal or regulatory news).")}
 
 
 def build_summaries(claims: List[Dict[str, Any]], sources: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -186,7 +201,9 @@ def build_brief_graph(orc, checkpointer=None, store=None):
         # Long-term memory: earlier briefs become a citable source for "what changed"
         memory = state.get("memory")
         if memory is None and store is not None:
-            briefs = mem.recent_briefs(store, ctx.ticker)
+            # Only earlier days: a same-day rerun must not treat its own previous
+            # output as "the last brief" and cite it instead of the filings
+            briefs = mem.recent_briefs(store, ctx.ticker, before=date.today().isoformat())
             memory = {}
             if briefs:
                 source = make_source(
@@ -199,6 +216,8 @@ def build_brief_graph(orc, checkpointer=None, store=None):
             update["memory"] = memory
 
         roles = "\n".join(f"- {name}: {desc}" for name, (desc, _) in ROLES.items())
+        roles += (f"\n(A news task covering every material event of the last {RECENT_DAYS} days is "
+                  "always added for you; don't plan another one.)")
         sections = "\n".join(f"- {title}: {goal}" for title, goal, _ in SECTIONS.values())
         if feedback:
             ask = ("A first draft failed verification for these claims:\n"
@@ -222,11 +241,13 @@ def build_brief_graph(orc, checkpointer=None, store=None):
                 f"Indexed documents (chunks by form#section): {ctx.inventory()}\n\n{ask}")},
         ]
         try:
-            tasks = [t.model_dump() for t in orc.llm.structured(messages, Plan).tasks]
+            tasks = [t.model_dump() for t in orc.llm.structured(messages, Plan).tasks][:MAX_TASKS]
         except Exception as e:
             logger.warning(f"Planner failed, using fallback plan: {e}")
             tasks = ([{"researcher": "filings", "objective": f"Find evidence for: {feedback[:800]}"}]
-                     if feedback else DEFAULT_PLAN)
+                     if feedback else list(DEFAULT_PLAN))
+        if not feedback:
+            tasks.append(recent_events_task((date.today() - timedelta(days=RECENT_DAYS)).isoformat()))
         detail = f"{len(tasks)} tasks" + (" (memory of earlier briefs loaded)" if memory else "")
         return {**update, "plan": tasks,
                 "trace": [{"node": "planner", "detail": detail, "tasks": tasks}]}
@@ -246,8 +267,8 @@ def build_brief_graph(orc, checkpointer=None, store=None):
             "Use the tools to gather evidence for your objective: 2-4 targeted calls, several "
             "at once if they are independent. Then report findings as concise bullet points. "
             "Each bullet states specific facts (figures, dates, names) copied exactly from the "
-            "tool results and ends with the id(s) of its sources exactly as shown, e.g. "
-            "[S1a2b3c]. Only use ids that appear in tool results. If a search returns nothing, "
+            "tool results and ends with the id(s) of its sources in brackets, exactly as shown in "
+            "the [S...] header of each result. Only use ids that appear in tool results. If a search returns nothing, "
             "retry with different filters before concluding evidence is missing."
         )
         notes, sources, calls = orc.llm.run_tools(
@@ -271,12 +292,17 @@ def build_brief_graph(orc, checkpointer=None, store=None):
         sections = "\n".join(
             f"- {key} ({title}, up to {n} claims): {goal}" for key, (title, goal, n) in SECTIONS.items()
         )
-        failed = [c for c in state.get("verification", {}).get("claims", []) if c["status"] != "verified"]
+        previous = state.get("verification", {})
+        failed = [c for c in previous.get("claims", []) if c["status"] != "verified"]
         revision = ""
         if failed:
             revision = "\n\nThese claims from the previous draft failed verification; fix them " \
                        "using the new notes or drop them:\n" + "\n".join(
                            f"- {c['text']} ({c['status']}: {c['reason']})" for c in failed)
+        if previous.get("missing_events"):
+            revision += "\n\nThe previous draft left out these material events; cover each in " \
+                        "'events' (and 'changes' if relevant) with its specifics from the notes:\n" + \
+                        "\n".join(f"- {m}" for m in previous["missing_events"])
         memory = state.get("memory") or {}
         if memory:
             remembered = (f"\n\nEarlier briefs (memory) - cite prior-brief facts with "
@@ -294,7 +320,7 @@ def build_brief_graph(orc, checkpointer=None, store=None):
                 "never as evidence for a fact. If the notes have no "
                 "evidence for a section, return an empty list for it; never write claims about "
                 "missing evidence. "
-                'Respond in JSON: {"overview": [{"text": "...", "sources": ["S1a2b3c"]}], '
+                'Respond in JSON: {"overview": [{"text": "...", "sources": ["<id from the notes>"]}], '
                 '"drivers": [...], "risks": [...], "events": [...], "outlook": [...], '
                 '"changes": [...]}')},
             {"role": "user", "content": f"Sections:\n{sections}\n\nResearch notes:\n{notes}"
@@ -311,7 +337,7 @@ def build_brief_graph(orc, checkpointer=None, store=None):
     def verifier(state: BriefState) -> Dict[str, Any]:
         sources = state.get("sources", {})
         claims = [{"section": key, **claim} for key in SECTIONS for claim in state["draft"].get(key, [])]
-        checked = [check_claim(claim, sources) for claim in claims]
+        checked = [reattribute(check_claim(claim, sources), sources) for claim in claims]
 
         # LLM judge for claims that passed the deterministic checks
         to_judge = [c for c in checked if c["status"] == "ok"]
@@ -341,15 +367,48 @@ def build_brief_graph(orc, checkpointer=None, store=None):
             claim["status"] = "verified" if verdict and verdict.supported else "unsupported"
             claim["reason"] = verdict.reason if verdict else "no verdict from judge"
 
+        # Completeness: faithfulness checks pass a draft that is true but leaves
+        # out the biggest news, so compare verified claims to recent 8-K events.
+        # An event whose filing a verified claim cites is covered; only ask the
+        # LLM about the rest (it flags covered events too often on its own)
+        cited = {filing_folder(sources[sid]["url"]) for c in checked if c["status"] == "verified"
+                 for sid in c["sources"] if sources[sid].get("url")}
+        events = [e for e in orc.context(state["ticker"]).recent_events(RECENT_DAYS)
+                  if filing_folder(e.get("url", "")) not in cited]
+        missing: List[str] = []
+        if events:
+            covered = "\n".join(f"- {c['text']}" for c in checked if c["status"] == "verified") or "(none)"
+            listing = "\n".join(f"{i}. {e['date']}: {e['title']} - {e['summary'][:300]}"
+                                for i, e in enumerate(events))
+            messages = [
+                {"role": "system", "content": (
+                    "You check an equity brief for omissions. Given the brief's claims and the "
+                    "company's recent 8-K filings, list the filings reporting a material event "
+                    "(leadership change, results, guidance, acquisition, major agreement, legal or "
+                    "regulatory action) that no claim covers. Ignore routine filings such as "
+                    "shareholder vote results or exhibit-only amendments. "
+                    'Respond in JSON: {"missing": [0, 2]}')},
+                {"role": "user", "content": f"Brief claims:\n{covered}\n\nRecent 8-K filings:\n{listing}"},
+            ]
+            try:
+                omitted = orc.llm.structured(messages, Omissions).missing
+                missing = [events[i]["title"] for i in dict.fromkeys(omitted) if 0 <= i < len(events)]
+            except Exception as e:
+                logger.error(f"Completeness check failed: {e}")
+
         verified = sum(c["status"] == "verified" for c in checked)
         coverage = verified / len(checked) if checked else 0.0
         revisions = state.get("revisions", 0)
-        revise = coverage < MIN_COVERAGE and revisions < MAX_REVISIONS
+        revise = (coverage < MIN_COVERAGE or bool(missing)) and revisions < MAX_REVISIONS
         previous = state.get("verification")
         feedback = "\n".join(
-            f"- [{c['section']}] {c['text']} -> {c['status']}: {c['reason']}"
-            for c in checked if c["status"] != "verified"
+            [f"- [{c['section']}] {c['text']} -> {c['status']}: {c['reason']}"
+             for c in checked if c["status"] != "verified"]
+            + [f"- [events] Material event missing from the brief: {m}" for m in missing]
         )
+        detail = f"{verified}/{len(checked)} verified ({coverage:.0%})"
+        if missing:
+            detail += f", {len(missing)} material events missing"
         return {
             "verification": {
                 "claims": checked,
@@ -357,12 +416,12 @@ def build_brief_graph(orc, checkpointer=None, store=None):
                 "total": len(checked),
                 "coverage": coverage,
                 "first_pass_coverage": previous["first_pass_coverage"] if previous else coverage,
+                "missing_events": missing,
                 "revisions": revisions + int(revise),
             },
             "feedback": feedback if revise else "",
             "revisions": revisions + int(revise),
-            "trace": [{"node": "verifier", "detail": f"{verified}/{len(checked)} verified "
-                                                     f"({coverage:.0%}){' - revising' if revise else ''}"}],
+            "trace": [{"node": "verifier", "detail": detail + (" - revising" if revise else "")}],
         }
 
     def score(state: BriefState) -> Dict[str, Any]:
@@ -444,8 +503,8 @@ def build_chat_graph(orc, checkpointer=None, store=None, history: int = 12):
                                  f"{mem.format_track_record(mem.summarize(scored))}")
         system = (
             f"You are an equity research assistant for {ticker}. Answer using the tools and "
-            "cite every fact with the source id exactly as it appears in tool results, e.g. "
-            "[S1a2b3c]. The brief's numbered references like [3:10-K#MD&A] are not valid "
+            "cite every fact with its source id in brackets, exactly as it appears in the [S...] "
+            "header of each tool result. The brief's numbered references like [3:10-K#MD&A] are not valid "
             "citations here: look facts up with the tools. Be concise. "
             f"The latest analyst brief, for context:\n{ctx.report[:6000] or 'none generated yet'}"
             f"{history_notes}"

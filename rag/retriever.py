@@ -60,7 +60,8 @@ class HybridRetriever:
         candidates: int = 20,
         filters: Optional[Dict[str, List[str]]] = None,
         weights: Optional[Tuple[float, float]] = None,
-        rerank: Optional[bool] = None
+        rerank: Optional[bool] = None,
+        since: Optional[str] = None
     ) -> List[Tuple[Dict[str, Any], float]]:
         """
         Retrieve relevant documents using hybrid approach.
@@ -75,6 +76,8 @@ class HybridRetriever:
                 retriever (used by the evaluation harness for ablations)
             rerank: Rerank fused candidates with the cross-encoder; defaults
                 to True when a reranker is configured
+            since: ISO date; only documents filed on or after it (relevance
+                ranking alone lets an old 10-K paragraph outrank last week's 8-K)
 
         Returns:
             List of (document, score) tuples
@@ -83,7 +86,7 @@ class HybridRetriever:
             logger.warning("Retriever not initialized properly")
             return []
         bm25_weight, semantic_weight = weights or (self.bm25_weight, self.semantic_weight)
-        allowed = self._allowed_indices(filters)
+        allowed = self._allowed_indices(filters, since)
         documents = self.vector_store.documents
 
         # 1. BM25 candidates (skip zero scores: no query term matched)
@@ -124,18 +127,23 @@ class HybridRetriever:
         logger.info(f"Retrieved {len(results)} documents for query: {query[:50]}...")
         return results
 
-    def _allowed_indices(self, filters: Optional[Dict[str, List[str]]]) -> Optional[set]:
-        """Indices of documents whose metadata matches every filter, or None if no filters."""
+    def _allowed_indices(
+        self,
+        filters: Optional[Dict[str, List[str]]],
+        since: Optional[str] = None
+    ) -> Optional[set]:
+        """Indices of documents matching every filter and filed on/after `since`, or None if unfiltered."""
         wanted = {
             key: {str(v).lower() for v in values}
             for key, values in (filters or {}).items() if values
         }
-        if not wanted:
+        if not wanted and not since:
             return None
         return {
             i for i, doc in enumerate(self.vector_store.documents)
             if all(str(doc.get("metadata", {}).get(key, "")).lower() in values
                    for key, values in wanted.items())
+            and (not since or str(doc.get("metadata", {}).get("filing_date", "")) >= since)
         }
 
     @staticmethod
